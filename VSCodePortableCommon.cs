@@ -8,13 +8,293 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 namespace VSCodePortableCommon
 {
+    public static class PortablePython
+    {
+        public static string UvPath(string baseDir)
+        {
+            return Path.Combine(baseDir, "data", "lib", "uv", "uv.exe");
+        }
+
+        public static string RuntimeDirectory(string baseDir)
+        {
+            return Path.Combine(baseDir, "data", "lib", "python");
+        }
+
+        public static string Quote(string value)
+        {
+            return "\"" + value.Replace("\"", "\\\"").TrimEnd('\\') + "\"";
+        }
+
+        public static string SelectLatestStablePython(string json)
+        {
+            var serializer = new JavaScriptSerializer();
+            var downloads = serializer.Deserialize<Dictionary<string, object>[]>(json);
+            Version latest = null;
+            foreach (var download in downloads)
+            {
+                string version = Convert.ToString(download["version"]);
+                Version parsed;
+                if (Convert.ToString(download["implementation"]) != "cpython" ||
+                    Convert.ToString(download["os"]) != "windows" ||
+                    Convert.ToString(download["arch"]) != "x86_64" ||
+                    Convert.ToString(download["variant"]) != "default" ||
+                    !Regex.IsMatch(version, @"^3\.\d+\.\d+$") ||
+                    !Version.TryParse(version, out parsed))
+                    continue;
+                if (latest == null || parsed > latest)
+                    latest = parsed;
+            }
+            if (latest == null)
+                throw new InvalidDataException("uv did not provide a stable Windows x64 CPython release.");
+            return latest.ToString();
+        }
+
+        public static async Task<string> RunAsync(string baseDir, string arguments,
+            System.Threading.CancellationToken cancellationToken, Action<string> logActivity = null)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = UvPath(baseDir),
+                Arguments = arguments,
+                WorkingDirectory = baseDir,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            ApplyEnvironment(startInfo, baseDir);
+            cancellationToken.ThrowIfCancellationRequested();
+            using (var process = Process.Start(startInfo))
+            {
+                var output = process.StandardOutput.ReadToEndAsync();
+                var error = process.StandardError.ReadToEndAsync();
+                var exited = Task.Run(() => process.WaitForExit());
+                using (cancellationToken.Register(() =>
+                {
+                    try { if (!process.HasExited) process.Kill(); }
+                    catch (InvalidOperationException) { }
+                }))
+                {
+                    if (await Task.WhenAny(exited, Task.Delay(TimeSpan.FromMinutes(10), cancellationToken)).ConfigureAwait(false) != exited)
+                    {
+                        try { if (!process.HasExited) process.Kill(); }
+                        catch (InvalidOperationException) { }
+                        await exited.ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        throw new TimeoutException("uv command timed out: " + arguments);
+                    }
+                    await exited.ConfigureAwait(false);
+                    string standardOutput = await output.ConfigureAwait(false);
+                    string standardError = await error.ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (logActivity != null && !string.IsNullOrWhiteSpace(standardError))
+                        logActivity(standardError.Trim());
+                    if (process.ExitCode != 0)
+                        throw new InvalidOperationException("uv failed: " + standardError.Trim());
+                    return standardOutput.Trim();
+                }
+            }
+        }
+
+        private static HttpClient CreateClient()
+        {
+            CommonHelper.EnableTls12();
+            var client = new HttpClient();
+            client.Timeout = TimeSpan.FromMinutes(10);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("CodeNix/2.0");
+            return client;
+        }
+
+        public static async Task<string> GetLatestUvVersionAsync()
+        {
+            using (var client = CreateClient())
+            {
+                string json = await client.GetStringAsync("https://api.github.com/repos/astral-sh/uv/releases/latest").ConfigureAwait(false);
+                var release = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                return Convert.ToString(release["tag_name"]).TrimStart('v');
+            }
+        }
+
+        public static async Task<string> InstallUvAsync(string baseDir, string targetVersion,
+            System.Threading.CancellationToken cancellationToken, Action<string> logActivity = null)
+        {
+            if (!string.IsNullOrEmpty(targetVersion) && !Regex.IsMatch(targetVersion, @"^\d+\.\d+\.\d+$"))
+                throw new ArgumentException("Invalid uv release version.", "targetVersion");
+            string library = Path.Combine(baseDir, "data", "lib");
+            Directory.CreateDirectory(library);
+            string staging = Path.Combine(library, ".uv-stage-" + Guid.NewGuid().ToString("N"));
+            string archive = Path.Combine(Path.GetTempPath(), "codenix-uv-" + Guid.NewGuid().ToString("N") + ".zip");
+            try
+            {
+                using (var client = CreateClient())
+                {
+                    string releaseUrl = "https://api.github.com/repos/astral-sh/uv/releases/" +
+                        (string.IsNullOrEmpty(targetVersion) ? "latest" : "tags/" + targetVersion);
+                    string json;
+                    using (var response = await client.GetAsync(releaseUrl, cancellationToken).ConfigureAwait(false))
+                    {
+                        response.EnsureSuccessStatusCode();
+                        json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    }
+                    var release = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                    string version = Convert.ToString(release["tag_name"]).TrimStart('v');
+                    if (Convert.ToBoolean(release["prerelease"]) || !Regex.IsMatch(version, @"^\d+\.\d+\.\d+$"))
+                        throw new InvalidDataException("A stable uv release is required.");
+                    if (!string.IsNullOrEmpty(targetVersion) && version != targetVersion)
+                        throw new InvalidDataException("The uv release does not match the requested version.");
+                    Dictionary<string, object> asset = null;
+                    foreach (var candidate in (System.Collections.IEnumerable)release["assets"])
+                    {
+                        var metadata = (Dictionary<string, object>)candidate;
+                        if (Convert.ToString(metadata["name"]) == "uv-x86_64-pc-windows-msvc.zip")
+                            asset = metadata;
+                    }
+                    if (asset == null || !asset.ContainsKey("digest") ||
+                        !Convert.ToString(asset["digest"]).StartsWith("sha256:", StringComparison.Ordinal))
+                        throw new InvalidDataException("The Windows uv archive or its SHA256 digest is missing.");
+                    await CommonHelper.DownloadFileWithRetryAsync(client,
+                        Convert.ToString(asset["browser_download_url"]), archive, cancellationToken).ConfigureAwait(false);
+                    string digest;
+                    using (var stream = File.OpenRead(archive))
+                    using (var sha256 = SHA256.Create())
+                        digest = "sha256:" + BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                    if (!string.Equals(digest, Convert.ToString(asset["digest"]), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("The uv archive SHA256 verification failed.");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ZipFile.ExtractToDirectory(archive, staging);
+                    if (!File.Exists(Path.Combine(staging, "uv.exe")))
+                        throw new InvalidDataException("The uv archive does not contain uv.exe.");
+                    CommonHelper.ReplaceDirectoryAtomically(staging, Path.GetDirectoryName(UvPath(baseDir)),
+                        Path.Combine(library, ".uv-backup"), logActivity);
+                    string installed = await RunAsync(baseDir, "--version", cancellationToken).ConfigureAwait(false);
+                    if (!installed.StartsWith("uv " + version + " ", StringComparison.Ordinal))
+                        throw new InvalidDataException("The installed uv version could not be verified.");
+                    return version;
+                }
+            }
+            finally
+            {
+                if (File.Exists(archive)) File.Delete(archive);
+                if (Directory.Exists(staging)) Directory.Delete(staging, true);
+            }
+        }
+
+        public static async Task<string> InstallLatestPythonAsync(string baseDir,
+            System.Threading.CancellationToken cancellationToken, Action<string> selectedVersion,
+            Action<string> logActivity = null)
+        {
+            string downloads = await RunAsync(baseDir,
+                "python list --only-downloads --output-format json --no-config cpython@3", cancellationToken).ConfigureAwait(false);
+            string version = SelectLatestStablePython(downloads);
+            if (selectedVersion != null) selectedVersion(version);
+            await RunAsync(baseDir, "python install cpython-" + version +
+                "-windows-x86_64-none --no-config --no-bin --no-registry", cancellationToken, logActivity).ConfigureAwait(false);
+            return version;
+        }
+
+        public static async Task<bool> RebaseEnvironmentAsync(string baseDir, string environmentDirectory,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            string configuration = Path.Combine(environmentDirectory, "pyvenv.cfg");
+            if (!File.Exists(configuration)) return false;
+            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string line in File.ReadAllLines(configuration))
+            {
+                int separator = line.IndexOf('=');
+                if (separator > 0) values[line.Substring(0, separator).Trim()] = line.Substring(separator + 1).Trim();
+            }
+            string home;
+            string version;
+            if (!values.TryGetValue("home", out home) || !values.TryGetValue("version_info", out version) ||
+                home.Replace('/', '\\').IndexOf(@"\data\lib\python\", StringComparison.OrdinalIgnoreCase) < 0 ||
+                !Regex.IsMatch(version, @"^3\.\d+\.\d+$"))
+                return false;
+            string runtimeStore = Path.GetFullPath(RuntimeDirectory(baseDir)).TrimEnd('\\') + "\\";
+            if (Path.GetFullPath(home).StartsWith(runtimeStore, StringComparison.OrdinalIgnoreCase))
+                return false;
+            string python = Path.Combine(runtimeStore, "cpython-" + version + "-windows-x86_64-none", "python.exe");
+            if (!File.Exists(python)) return false;
+            await RunAsync(baseDir, "venv --python " + Quote(version) +
+                " --relocatable --allow-existing --no-python-downloads --no-config --no-project " +
+                Quote(environmentDirectory), cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+
+        public static async Task RebaseProjectsAsync(string baseDir, Action<string> logActivity)
+        {
+            string projects = Path.Combine(baseDir, "projects");
+            if (!Directory.Exists(projects) || !File.Exists(UvPath(baseDir))) return;
+            var pending = new Stack<string>();
+            pending.Push(projects);
+            while (pending.Count > 0)
+            {
+                string directory = pending.Pop();
+                string[] children;
+                try { children = Directory.GetDirectories(directory); }
+                catch (UnauthorizedAccessException ex)
+                {
+                    logActivity("Project directory could not be inspected: " + directory + ": " + ex.Message);
+                    continue;
+                }
+                foreach (string child in children)
+                {
+                    string name = Path.GetFileName(child);
+                    if ((File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0 ||
+                        name == ".git" || name == "node_modules" || name == "__pycache__" || name == ".cache")
+                        continue;
+                    if (name == ".venv")
+                    {
+                        try
+                        {
+                            if (await RebaseEnvironmentAsync(baseDir, child, default(System.Threading.CancellationToken)).ConfigureAwait(false))
+                                logActivity("Rebased project environment: " + child);
+                        }
+                        catch (Exception ex) { logActivity("Project environment was not rebased: " + child + ": " + ex.Message); }
+                    }
+                    else pending.Push(child);
+                }
+            }
+        }
+
+        public static void ApplyEnvironment(ProcessStartInfo startInfo, string baseDir)
+        {
+            string root = Path.GetFullPath(baseDir);
+            startInfo.EnvironmentVariables["VSCODE_PORTABLE"] = Path.Combine(root, "data");
+            startInfo.EnvironmentVariables["UV_PYTHON_INSTALL_DIR"] = RuntimeDirectory(root);
+            startInfo.EnvironmentVariables["UV_CACHE_DIR"] = Path.Combine(root, "data", "cache", "uv");
+            startInfo.EnvironmentVariables["UV_PYTHON_CACHE_DIR"] = Path.Combine(root, "data", "cache", "python");
+            startInfo.EnvironmentVariables["UV_TOOL_DIR"] = Path.Combine(root, "data", "lib", "uv-tools");
+            startInfo.EnvironmentVariables["UV_TOOL_BIN_DIR"] = Path.Combine(root, "data", "bin");
+            startInfo.EnvironmentVariables["UV_CREDENTIALS_DIR"] = Path.Combine(root, "data", "uv", "credentials");
+            startInfo.EnvironmentVariables["UV_PYTHON_BIN_DIR"] = Path.Combine(root, "data", "bin");
+            startInfo.EnvironmentVariables["UV_PYTHON_INSTALL_BIN"] = "0";
+            startInfo.EnvironmentVariables["UV_PYTHON_INSTALL_REGISTRY"] = "0";
+            startInfo.EnvironmentVariables["UV_PYTHON_NO_REGISTRY"] = "1";
+            startInfo.EnvironmentVariables["UV_PYTHON_PREFERENCE"] = "only-managed";
+            startInfo.EnvironmentVariables["UV_LINK_MODE"] = "hardlink";
+            startInfo.EnvironmentVariables["UV_NO_PROGRESS"] = "1";
+            foreach (string name in new[]
+            {
+                "UV_PYTHON", "UV_PROJECT_ENVIRONMENT", "PYTHONHOME", "PYTHONPATH",
+                "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "ELECTRON_RUN_AS_NODE"
+            })
+                startInfo.EnvironmentVariables.Remove(name);
+
+            string uvDirectory = Path.GetDirectoryName(UvPath(root));
+            string inheritedPath = startInfo.EnvironmentVariables["PATH"] ?? string.Empty;
+            startInfo.EnvironmentVariables["PATH"] = uvDirectory + ";" + inheritedPath;
+        }
+    }
+
     public static class CodeNixTheme
     {
         public static readonly Color Background = Color.FromArgb(238, 243, 249);
@@ -264,149 +544,6 @@ namespace VSCodePortableCommon
             }
         }
 
-        public static void EnsureEmbeddedPythonWorkspaceImports(string pythonDir)
-        {
-            if (string.IsNullOrWhiteSpace(pythonDir))
-                throw new ArgumentException("A Python installation directory is required.", "pythonDir");
-            if (!Directory.Exists(pythonDir))
-                throw new DirectoryNotFoundException("Embedded Python directory not found: " + pythonDir);
-
-            string[] pathConfigurationFiles = Directory.GetFiles(pythonDir, "python*._pth", SearchOption.TopDirectoryOnly);
-            foreach (string pathConfigurationFile in pathConfigurationFiles)
-            {
-                byte[] originalBytes = File.ReadAllBytes(pathConfigurationFile);
-                bool hasUtf8Bom = originalBytes.Length >= 3 &&
-                    originalBytes[0] == 0xEF &&
-                    originalBytes[1] == 0xBB &&
-                    originalBytes[2] == 0xBF;
-                string originalContents = new UTF8Encoding(false, true).GetString(
-                    originalBytes,
-                    hasUtf8Bom ? 3 : 0,
-                    originalBytes.Length - (hasUtf8Bom ? 3 : 0));
-                string updatedContents = EnsurePythonPathConfiguration(originalContents);
-
-                if (hasUtf8Bom || !string.Equals(originalContents, updatedContents, StringComparison.Ordinal))
-                    WriteUtf8FileAtomicallyIfChanged(pathConfigurationFile, updatedContents);
-            }
-
-            string sitePackagesDir = Path.Combine(pythonDir, "Lib", "site-packages");
-            Directory.CreateDirectory(sitePackagesDir);
-
-            const string workspacePathHookFileName = "codenix_workspace_paths.py";
-            const string workspacePathHookContents =
-                "import os\r\n" +
-                "import sys\r\n" +
-                "\r\n" +
-                "def _add_workspace_paths():\r\n" +
-                "    candidates = []\r\n" +
-                "    if sys.argv and sys.argv[0] and sys.argv[0] not in ('-c', '-m'):\r\n" +
-                "        script_path = os.path.abspath(sys.argv[0])\r\n" +
-                "        script_dir = script_path if os.path.isdir(script_path) else os.path.dirname(script_path)\r\n" +
-                "        if script_dir:\r\n" +
-                "            candidates.append(script_dir)\r\n" +
-                "    try:\r\n" +
-                "        workspace_dir = os.getcwd()\r\n" +
-                "        candidates.append(workspace_dir)\r\n" +
-                "        candidates.append(os.path.join(workspace_dir, 'src'))\r\n" +
-                "    except OSError:\r\n" +
-                "        pass\r\n" +
-                "    existing = set()\r\n" +
-                "    for entry in sys.path:\r\n" +
-                "        try:\r\n" +
-                "            existing.add(os.path.normcase(os.path.abspath(entry or os.getcwd())))\r\n" +
-                "        except OSError:\r\n" +
-                "            continue\r\n" +
-                "    for candidate in reversed(candidates):\r\n" +
-                "        normalized = os.path.normcase(os.path.abspath(candidate))\r\n" +
-                "        if os.path.isdir(candidate) and normalized not in existing:\r\n" +
-                "            sys.path.insert(0, candidate)\r\n" +
-                "            existing.add(normalized)\r\n" +
-                "\r\n" +
-                "_add_workspace_paths()\r\n" +
-                "del _add_workspace_paths\r\n";
-            string workspacePathHookFile = Path.Combine(sitePackagesDir, workspacePathHookFileName);
-            WriteUtf8FileAtomicallyIfChanged(workspacePathHookFile, workspacePathHookContents);
-
-            string workspacePathHookEntry = "import codenix_workspace_paths" + Environment.NewLine;
-            string workspacePathHookPth = Path.Combine(sitePackagesDir, "codenix_workspace_paths.pth");
-            WriteUtf8FileAtomicallyIfChanged(workspacePathHookPth, workspacePathHookEntry);
-
-        }
-
-        private static string EnsurePythonPathConfiguration(string contents)
-        {
-            string newline = contents.IndexOf("\r\n", StringComparison.Ordinal) >= 0
-                ? "\r\n"
-                : Environment.NewLine;
-            var lines = Regex.Split(contents, "\r\n|\n|\r").ToList();
-            bool hadTrailingNewline = contents.EndsWith("\r", StringComparison.Ordinal) ||
-                contents.EndsWith("\n", StringComparison.Ordinal);
-            int siteImportIndex = -1;
-            bool hasSitePackages = false;
-
-            for (int i = 0; i < lines.Count; i++)
-            {
-                string trimmedLine = lines[i].Trim();
-                if (Regex.IsMatch(trimmedLine, @"^#\s*import\s+site\b", RegexOptions.IgnoreCase))
-                {
-                    lines[i] = "import site";
-                    siteImportIndex = i;
-                }
-                else if (Regex.IsMatch(trimmedLine, @"^import\s+site\b", RegexOptions.IgnoreCase))
-                {
-                    siteImportIndex = i;
-                }
-
-                string normalizedPath = trimmedLine.Replace('/', '\\').TrimEnd('\\');
-                if (string.Equals(normalizedPath, @"Lib\site-packages", StringComparison.OrdinalIgnoreCase))
-                    hasSitePackages = true;
-            }
-
-            if (!hasSitePackages)
-            {
-                int insertIndex = siteImportIndex >= 0 ? siteImportIndex : lines.Count;
-                lines.Insert(insertIndex, @"Lib\site-packages");
-                if (siteImportIndex >= 0)
-                    siteImportIndex++;
-            }
-
-            if (siteImportIndex < 0)
-                lines.Add("import site");
-
-            string updatedContents = string.Join(newline, lines);
-            if (hadTrailingNewline && !updatedContents.EndsWith(newline, StringComparison.Ordinal))
-                updatedContents += newline;
-            return updatedContents;
-        }
-
-        private static void WriteUtf8FileAtomicallyIfChanged(string filePath, string contents)
-        {
-            if (File.Exists(filePath) &&
-                string.Equals(File.ReadAllText(filePath, new UTF8Encoding(false, true)), contents, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            string directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory))
-                Directory.CreateDirectory(directory);
-
-            string tempPath = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
-            {
-                File.WriteAllText(tempPath, contents, new UTF8Encoding(false));
-                if (File.Exists(filePath))
-                    File.Replace(tempPath, filePath, null);
-                else
-                    File.Move(tempPath, filePath);
-            }
-            finally
-            {
-                if (File.Exists(tempPath))
-                    File.Delete(tempPath);
-            }
-        }
-
         public static async Task DownloadFileWithRetryAsync(
             HttpClient client,
             string url,
@@ -578,89 +715,6 @@ namespace VSCodePortableCommon
                 System.Net.SecurityProtocolType.Tls;
         }
 
-        public static async Task<string> GetLatestPythonPatchVersionAsync(string majorMinor)
-        {
-            string requestedVersion = (majorMinor ?? string.Empty).Trim();
-            bool findLatestAvailable = string.Equals(requestedVersion, "latest", StringComparison.OrdinalIgnoreCase);
-            if (!findLatestAvailable && !Regex.IsMatch(requestedVersion, @"^3\.\d+$"))
-            {
-                throw new ArgumentException("Python version must be 'latest' or have the form 3.x.", "majorMinor");
-            }
-
-            EnableTls12();
-
-            var handler = new HttpClientHandler
-            {
-                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
-            };
-
-            using (var client = new HttpClient(handler))
-            {
-                client.Timeout = TimeSpan.FromSeconds(20);
-                client.DefaultRequestHeaders.UserAgent.ParseAdd("CodeNix/1.0");
-                string html = await client.GetStringAsync("https://www.python.org/ftp/python/");
-                string versionPattern = findLatestAvailable
-                    ? @"3\.\d+\.\d+"
-                    : Regex.Escape(requestedVersion) + @"\.\d+";
-                var matches = Regex.Matches(
-                    html,
-                    @"href=[""'](?<version>" + versionPattern + @")/[""']",
-                    RegexOptions.IgnoreCase);
-
-                var candidates = new List<KeyValuePair<Version, string>>();
-                foreach (Match match in matches)
-                {
-                    Version parsedVersion;
-                    string candidate = match.Groups["version"].Value;
-                    if (Version.TryParse(candidate, out parsedVersion) &&
-                        !candidates.Any(item => item.Key.Equals(parsedVersion)))
-                        candidates.Add(new KeyValuePair<Version, string>(parsedVersion, candidate));
-                }
-
-                foreach (var candidate in candidates.OrderByDescending(item => item.Key))
-                {
-                    string packageUrl = "https://www.python.org/ftp/python/" + candidate.Value +
-                        "/python-" + candidate.Value + "-embed-amd64.zip";
-                    using (var request = new HttpRequestMessage(HttpMethod.Head, packageUrl))
-                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead))
-                    {
-                        if (response.IsSuccessStatusCode)
-                            return candidate.Value;
-
-                        bool headCanIndicateUnavailablePackage =
-                            response.StatusCode == System.Net.HttpStatusCode.MethodNotAllowed ||
-                            response.StatusCode == System.Net.HttpStatusCode.NotImplemented ||
-                            response.StatusCode == System.Net.HttpStatusCode.NotFound ||
-                            response.StatusCode == System.Net.HttpStatusCode.Gone;
-                        using (var getRequest = new HttpRequestMessage(HttpMethod.Get, packageUrl))
-                        {
-                            getRequest.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 0);
-                            using (var getResponse = await client.SendAsync(getRequest, HttpCompletionOption.ResponseHeadersRead))
-                            {
-                                if (getResponse.IsSuccessStatusCode)
-                                    return candidate.Value;
-
-                                if (getResponse.StatusCode == System.Net.HttpStatusCode.NotFound ||
-                                    getResponse.StatusCode == System.Net.HttpStatusCode.Gone)
-                                {
-                                    if (headCanIndicateUnavailablePackage)
-                                        continue;
-                                    response.EnsureSuccessStatusCode();
-                                }
-
-                                getResponse.EnsureSuccessStatusCode();
-                            }
-                        }
-                    }
-                }
-
-                return string.Empty;
-            }
-        }
-
-        /// <summary>
-        /// Copy directory recursively with optimized buffering
-        /// </summary>
         public static void CopyDirectoryRecursive(string sourceDir, string destDir, bool overwrite = true)
         {
             Directory.CreateDirectory(destDir);
@@ -1291,7 +1345,7 @@ namespace VSCodePortableCommon
                 logActivity(moduleName + ": Extracting package...");
                 Directory.CreateDirectory(extractPath);
                 bool extractSucceeded = false;
-                
+
                 try
                 {
                     await CommonHelper.ExtractZipWithProgressAsync(
@@ -1649,213 +1703,6 @@ namespace VSCodePortableCommon
         }
     }
 
-    public class PythonInstaller
-    {
-        private readonly string baseDir;
-        private readonly Action<string, string, int> updateStatus;
-        private readonly Action<string> logActivity;
-
-        public PythonInstaller(string baseDir, Action<string, string, int> updateStatus, Action<string> logActivity = null)
-        {
-            this.baseDir = baseDir;
-            this.updateStatus = updateStatus;
-            this.logActivity = logActivity ?? (_ => { });
-        }
-
-        public async Task<KeyValuePair<string, string>> UpgradeAsync(string currentVersion, string targetVersion)
-        {
-            const string componentName = "Python";
-            string version = "";
-            string dataLibDir = Path.Combine(baseDir, "data", "lib");
-            string pythonDir = Path.Combine(dataLibDir, "python");
-            string stagingDir = Path.Combine(dataLibDir, ".python-stage-" + Guid.NewGuid().ToString("N"));
-            string backupDir = Path.Combine(dataLibDir, ".python-backup");
-            string tempDir = Path.Combine(Path.GetTempPath(), "codenix-python-" + Guid.NewGuid().ToString("N"));
-
-            try
-            {
-                Version current;
-                Version requested;
-                if (!Version.TryParse(currentVersion, out current))
-                    throw new InvalidDataException("The installed Python version is not a valid numeric version: " + currentVersion);
-                if (!Version.TryParse(targetVersion, out requested))
-                    throw new InvalidDataException("The requested Python version is invalid: " + targetVersion);
-                if (current.Major != requested.Major || current.Minor != requested.Minor)
-                    throw new InvalidOperationException("Python updates must keep the installed major.minor version.");
-
-                if (requested <= current)
-                    return new KeyValuePair<string, string>("PYTHON_VERSION", currentVersion);
-
-                updateStatus(componentName, "Preparing patch update...", 5);
-                logActivity("Python: Updating " + currentVersion + " to " + targetVersion + "...");
-
-                Directory.CreateDirectory(dataLibDir);
-                RecoverBackup(pythonDir, backupDir);
-                Directory.CreateDirectory(tempDir);
-
-                string zipPath = Path.Combine(tempDir, "python.zip");
-                string downloadUrl = "https://www.python.org/ftp/python/" + targetVersion +
-                    "/python-" + targetVersion + "-embed-amd64.zip";
-                using (var client = new HttpClient())
-                {
-                    client.Timeout = TimeSpan.FromMinutes(20);
-                    client.DefaultRequestHeaders.UserAgent.ParseAdd("CodeNix/1.0");
-                    await CommonHelper.DownloadFileWithRetryAsync(
-                        client,
-                        downloadUrl,
-                        zipPath,
-                        default(System.Threading.CancellationToken),
-                        (downloaded, total) =>
-                        {
-                            if (total > 0)
-                            {
-                                int progress = 10 + (int)(35.0 * downloaded / total);
-                                updateStatus(componentName, "Downloading...", Math.Min(progress, 45));
-                            }
-                        });
-                }
-
-                int shortVersion = requested.Major * 100 + requested.Minor;
-                string pthFileName = "python" + shortVersion + "._pth";
-                using (var archive = ZipFile.OpenRead(zipPath))
-                {
-                    if (archive.GetEntry("python.exe") == null || archive.GetEntry(pthFileName) == null)
-                        throw new InvalidDataException("The Python embeddable archive is missing required runtime files.");
-                }
-
-                if (Directory.Exists(stagingDir))
-                    Directory.Delete(stagingDir, true);
-                Directory.CreateDirectory(stagingDir);
-                await CommonHelper.ExtractZipWithProgressAsync(
-                    zipPath,
-                    stagingDir,
-                    componentName,
-                    45,
-                    80,
-                    progress => updateStatus(componentName, "Extracting...", progress),
-                    logActivity,
-                    default(System.Threading.CancellationToken));
-
-                ConfigureEmbeddedPython(stagingDir, pthFileName);
-                PreservePythonPackages(pythonDir, stagingDir);
-                ValidatePythonRuntime(Path.Combine(stagingDir, "python.exe"), targetVersion);
-
-                updateStatus(componentName, "Installing...", 92);
-                CommonHelper.ReplaceDirectoryAtomically(
-                    stagingDir,
-                    pythonDir,
-                    backupDir,
-                    message => logActivity("Python: " + message));
-
-                version = targetVersion;
-                updateStatus(componentName, "✓ Completed", 100);
-                logActivity("Python: Patch update completed - " + version);
-            }
-            catch (Exception ex)
-            {
-                version = "";
-                updateStatus(componentName, "⚠ Error: " + ex.Message, 0);
-                logActivity("Python: Update failed - " + ex.Message);
-                if (Directory.Exists(stagingDir))
-                {
-                    try { Directory.Delete(stagingDir, true); }
-                    catch (IOException cleanupError) { logActivity("Python: Staging cleanup warning - " + cleanupError.Message); }
-                    catch (UnauthorizedAccessException cleanupError) { logActivity("Python: Staging cleanup warning - " + cleanupError.Message); }
-                }
-            }
-            finally
-            {
-                if (Directory.Exists(tempDir))
-                {
-                    try { Directory.Delete(tempDir, true); }
-                    catch (IOException ex) { logActivity("Python: Temporary download cleanup warning - " + ex.Message); }
-                    catch (UnauthorizedAccessException ex) { logActivity("Python: Temporary download cleanup warning - " + ex.Message); }
-                }
-            }
-
-            return string.IsNullOrEmpty(version)
-                ? new KeyValuePair<string, string>()
-                : new KeyValuePair<string, string>("PYTHON_VERSION", version);
-        }
-
-        private static void RecoverBackup(string pythonDir, string backupDir)
-        {
-            CommonHelper.RecoverDirectoryReplacement(pythonDir, backupDir);
-        }
-
-        private static void ConfigureEmbeddedPython(string stagingDir, string pthFileName)
-        {
-            string pthPath = Path.Combine(stagingDir, pthFileName);
-            string content = File.ReadAllText(pthPath, Encoding.UTF8);
-            if (content.Length > 0 && content[0] == '\uFEFF')
-                content = content.Substring(1);
-
-            content = Regex.Replace(
-                content,
-                @"(?m)^#\s*import\s+site\s*$",
-                "import site",
-                RegexOptions.IgnoreCase);
-            File.WriteAllText(pthPath, content, new UTF8Encoding(false));
-        }
-
-        private static void PreservePythonPackages(string pythonDir, string stagingDir)
-        {
-            string[] preservedDirectories =
-            {
-                Path.Combine("Lib", "site-packages"),
-                "Scripts"
-            };
-
-            foreach (string relativePath in preservedDirectories)
-            {
-                string source = Path.Combine(pythonDir, relativePath);
-                if (Directory.Exists(source))
-                    CommonHelper.CopyDirectoryRecursive(source, Path.Combine(stagingDir, relativePath), true);
-            }
-
-            string pipCommand = Path.Combine(pythonDir, "pip.cmd");
-            if (File.Exists(pipCommand))
-                File.Copy(pipCommand, Path.Combine(stagingDir, "pip.cmd"), true);
-        }
-
-        private static void ValidatePythonRuntime(string pythonExe, string expectedVersion)
-        {
-            if (!File.Exists(pythonExe) || new FileInfo(pythonExe).Length == 0)
-                throw new InvalidDataException("The staged Python executable is missing or empty.");
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = pythonExe,
-                Arguments = "--version",
-                WorkingDirectory = Path.GetDirectoryName(pythonExe),
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            using (var process = Process.Start(startInfo))
-            {
-                string output = process.StandardOutput.ReadToEnd();
-                string error = process.StandardError.ReadToEnd();
-                if (!process.WaitForExit(10000))
-                {
-                    process.Kill();
-                    throw new TimeoutException("The staged Python runtime did not start within 10 seconds.");
-                }
-                if (process.ExitCode != 0)
-                    throw new InvalidDataException("The staged Python runtime failed validation: " + (error + " " + output).Trim());
-
-                var match = Regex.Match(output + " " + error, @"Python\s+(\d+\.\d+\.\d+)", RegexOptions.IgnoreCase);
-                if (!match.Success || !string.Equals(match.Groups[1].Value, expectedVersion, StringComparison.Ordinal))
-                    throw new InvalidDataException("The staged Python runtime version did not match " + expectedVersion + ".");
-            }
-        }
-    }
-
-    /// <summary>
-    /// VSCode installer/upgrader
-    /// </summary>
     public class VSCodeInstaller
     {
         private readonly string baseDir;

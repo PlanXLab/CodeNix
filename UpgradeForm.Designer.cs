@@ -478,7 +478,7 @@ namespace VSCodePortableLauncher
             this.pythonNameLabel.Name = "pythonNameLabel";
             this.pythonNameLabel.Size = new System.Drawing.Size(90, 31);
             this.pythonNameLabel.TabIndex = 18;
-            this.pythonNameLabel.Text = "Python";
+            this.pythonNameLabel.Text = "uv";
             this.pythonNameLabel.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             //
             // pythonProgressBar

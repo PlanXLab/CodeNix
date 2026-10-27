@@ -46,6 +46,28 @@ function Add-PortablePath ([string]$Name, [string[]]$Directories) {
 Add-PortablePath 'Path' @($Bin, $UnixBin)
 Add-PortablePath 'PSModulePath' @($Modules)
 
+$pythonStorage = @{
+    UV_PYTHON_INSTALL_DIR = "$PortableData\lib\python"
+    UV_CACHE_DIR = "$PortableData\cache\uv"
+    UV_PYTHON_CACHE_DIR = "$PortableData\cache\python"
+    UV_TOOL_DIR = "$PortableData\lib\uv-tools"
+    UV_TOOL_BIN_DIR = "$PortableData\bin"
+    UV_CREDENTIALS_DIR = "$PortableData\uv\credentials"
+    UV_PYTHON_BIN_DIR = "$PortableData\bin"
+    UV_PYTHON_INSTALL_BIN = '0'
+    UV_PYTHON_INSTALL_REGISTRY = '0'
+    UV_PYTHON_NO_REGISTRY = '1'
+    UV_PYTHON_PREFERENCE = 'only-managed'
+    UV_LINK_MODE = 'hardlink'
+}
+foreach ($name in $pythonStorage.Keys) {
+    [Environment]::SetEnvironmentVariable($name, $pythonStorage[$name], 'Process')
+}
+Add-PortablePath 'Path' @("$PortableData\lib\uv", "$PortableData\bin")
+if ($env:VIRTUAL_ENV -and [System.IO.Directory]::Exists("$env:VIRTUAL_ENV\Scripts")) {
+    Add-PortablePath 'Path' @("$env:VIRTUAL_ENV\Scripts")
+}
+
 function Get-PortableInitScript ([string]$CachePath, [scriptblock]$GetCacheKey, [scriptblock]$Generate) {
     $header = "# CodeNix init: $(& $GetCacheKey)"
     if ([System.IO.File]::Exists($CachePath)) {
@@ -391,16 +413,71 @@ function ..   { Set-Location .. }
 function ...  { Set-Location ../.. }
 function .... { Set-Location ../../.. }
 
+function Repair-CodeNixPythonEnvironment ([string]$EnvironmentPath) {
+    $configuration = Join-Path $EnvironmentPath 'pyvenv.cfg'
+    if (-not [System.IO.File]::Exists($configuration)) { throw "Not a Python virtual environment: $EnvironmentPath" }
+    $values = @{}
+    foreach ($line in [System.IO.File]::ReadAllLines($configuration)) {
+        $separator = $line.IndexOf('=')
+        if ($separator -gt 0) { $values[$line.Substring(0, $separator).Trim()] = $line.Substring($separator + 1).Trim() }
+    }
+    $store = [System.IO.Path]::GetFullPath($env:UV_PYTHON_INSTALL_DIR).TrimEnd('\') + '\'
+    if ($values.home -and $values.home.Replace('/', '\').Contains('\data\lib\python\') -and
+        -not [System.IO.Path]::GetFullPath($values.home).StartsWith($store, [StringComparison]::OrdinalIgnoreCase) -and
+        $values.version_info -match '^3\.\d+\.\d+$') {
+        $runtime = Join-Path $store "cpython-$($values.version_info)-windows-x86_64-none\python.exe"
+        $uv = "$PortableData\lib\uv\uv.exe"
+        if ([System.IO.File]::Exists($runtime) -and [System.IO.File]::Exists($uv)) {
+            & $uv venv --python $values.version_info --relocatable --allow-existing --no-python-downloads --no-config --no-project $EnvironmentPath | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not rebase virtual environment: $EnvironmentPath" }
+        }
+    }
+}
+
+function Get-CodeNixPythonEnvironment ([string]$FilePath) {
+    if ($env:VIRTUAL_ENV) {
+        $environmentPath = [System.IO.Path]::GetFullPath($env:VIRTUAL_ENV)
+    } else {
+        $directory = [System.IO.DirectoryInfo]::new([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($FilePath)))
+        $environmentPath = $null
+        while ($directory) {
+            $candidate = Join-Path $directory.FullName '.venv'
+            if ([System.IO.File]::Exists((Join-Path $candidate 'pyvenv.cfg'))) {
+                $environmentPath = $candidate
+                break
+            }
+            if ([System.IO.File]::Exists((Join-Path $directory.FullName 'pyproject.toml'))) { break }
+            $directory = $directory.Parent
+        }
+    }
+    if (-not $environmentPath) { throw 'No project virtual environment. Create or activate one with uv before running Python.' }
+    Repair-CodeNixPythonEnvironment $environmentPath
+    $python = Join-Path $environmentPath 'Scripts\python.exe'
+    if (-not [System.IO.File]::Exists($python)) { throw "The project virtual environment is unavailable: $environmentPath" }
+    return $environmentPath
+}
+
 function Get-PyRunner ([string]$FilePath) {
+    $environmentPath = Get-CodeNixPythonEnvironment $FilePath
     $reader = $null
     try {
         $reader = [System.IO.File]::OpenText($FilePath)
         $firstLine = $reader.ReadLine()
-        if ($null -ne $firstLine -and $firstLine -match '^#!\s*(?:\S*[\\/])?(?:env\s+(?:-S\s+)?)?replx(?:\.exe)?(?:\s|$)') { return 'replx' }
-    } catch {} finally {
+        if ($null -ne $firstLine -and $firstLine -match '^#!\s*(?:\S*[\\/])?(?:env\s+(?:-S\s+)?)?replx(?:\.exe)?(?:\s|$)') {
+            $replx = Join-Path $environmentPath 'Scripts\replx.exe'
+            if (-not [System.IO.File]::Exists($replx)) { throw 'replx is not installed in the project virtual environment.' }
+            return $replx
+        }
+    } finally {
         if ($null -ne $reader) { $reader.Dispose() }
     }
-    return 'python'
+    return (Join-Path $environmentPath 'Scripts\python.exe')
+}
+
+function Invoke-CodeNixPythonScript {
+    param([string]$FilePath)
+    $runner = Get-PyRunner $FilePath
+    & $runner $FilePath @args
 }
 
 if (-not (Get-Variable -Name CodeNixCommandNotFoundAction -Scope Script -ErrorAction SilentlyContinue)) {
@@ -412,8 +489,7 @@ if (-not (Get-Variable -Name CodeNixCommandNotFoundAction -Scope Script -ErrorAc
             try {
                 $targetFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($cleanName)
                 if ([System.IO.File]::Exists($targetFile)) {
-                    $runner = Get-PyRunner $targetFile
-                    $CommandLookupEventArgs.CommandScriptBlock = { & $runner $targetFile @args }.GetNewClosure()
+                    $CommandLookupEventArgs.CommandScriptBlock = { Invoke-CodeNixPythonScript $targetFile @args }.GetNewClosure()
                     $CommandLookupEventArgs.StopSearch = $true
                     return
                 }
@@ -443,8 +519,7 @@ function ConvertTo-PyCommandLine ([string]$Line) {
         $targetFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($fileExpression.Value)
         if (-not [System.IO.File]::Exists($targetFile)) { return $Line }
     } catch { return $Line }
-    $runner = Get-PyRunner $targetFile
-    $replacement = "& '$runner' '$($targetFile.Replace("'", "''"))'"
+    $replacement = "& 'Invoke-CodeNixPythonScript' '$($targetFile.Replace("'", "''"))'"
     return $Line.Substring(0, $start) + $replacement + $Line.Substring($fileExpression.Extent.EndOffset)
 }
 

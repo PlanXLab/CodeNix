@@ -21,13 +21,10 @@ namespace VSCodePortableLauncher
 
         static readonly string[] PlatformSensitiveVSCodeExtensions = new[]
         {
-            "ms-python.vscode-python-envs"
+            "ms-python.python", "ms-python.vscode-python-envs", "ms-python.debugpy"
         };
 
-        static readonly string[] OptionalAutoInstalledVSCodeExtensions = new[]
-        {
-            "ms-python.debugpy"
-        };
+        static readonly string[] OptionalAutoInstalledVSCodeExtensions = new string[0];
 
         [STAThread]
         static int Main(string[] args)
@@ -121,8 +118,8 @@ namespace VSCodePortableLauncher
                 Path.Combine(dataLibDir, "pwsh"),
                 Path.Combine(dataLibDir, ".pwsh-backup"));
             CommonHelper.RecoverDirectoryReplacement(
-                Path.Combine(dataLibDir, "python"),
-                Path.Combine(dataLibDir, ".python-backup"));
+                Path.Combine(dataLibDir, "uv"),
+                Path.Combine(dataLibDir, ".uv-backup"));
             VSCodeInstaller.RecoverInterruptedPortableUpdate(pvsDir);
         }
 
@@ -198,7 +195,7 @@ namespace VSCodePortableLauncher
         {
             var upgradeFlags = new[]
             {
-                "upgrade_python", "upgrade_pwsh7", "upgrade_ohmyposh",
+                "upgrade_uv", "upgrade_pwsh7", "upgrade_ohmyposh",
                 "upgrade_psfzf", "upgrade_modern_unix", "upgrade_vscode"
             };
             return upgradeFlags.Where(flag => File.Exists(Path.Combine(pvsDir, flag))).ToList();
@@ -222,19 +219,8 @@ namespace VSCodePortableLauncher
 
         static ProcessStartInfo CreateVSCodeStartInfo(string pvsDir)
         {
-            try
-            {
-                CommonHelper.EnsureEmbeddedPythonWorkspaceImports(Path.Combine(pvsDir, "data", "lib", "python"));
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(
-                    "CodeNix could not configure Python to import modules from the current workspace. Python may not be able to import workspace-local modules.\r\n\r\n" +
-                    ex.Message,
-                    "Python workspace configuration warning",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-            }
+            PortablePython.RebaseProjectsAsync(pvsDir,
+                message => Debug.WriteLine(message)).GetAwaiter().GetResult();
 
             string codeExe = Path.Combine(pvsDir, "Code.exe");
             string extensionsDir = Path.Combine(pvsDir, "data", "extensions");
@@ -254,13 +240,12 @@ namespace VSCodePortableLauncher
 
         static void ApplyPortableRuntimeEnvironment(ProcessStartInfo psi, string pvsDir)
         {
-            psi.EnvironmentVariables["VSCODE_PORTABLE"] = Path.Combine(pvsDir, "data");
+            PortablePython.ApplyEnvironment(psi, pvsDir);
 
             var preferredPaths = new[]
             {
                 Path.Combine(pvsDir, "bin"),
-                Path.Combine(pvsDir, "data", "lib", "python"),
-                Path.Combine(pvsDir, "data", "lib", "python", "Scripts"),
+                Path.Combine(pvsDir, "data", "bin"),
                 Path.Combine(pvsDir, "data", "lib", "pwsh"),
                 Path.Combine(pvsDir, "data", "lib", "pwsh", "bin")
             };
@@ -548,9 +533,7 @@ namespace VSCodePortableLauncher
 
                 string contents = File.ReadAllText(settingsPath);
                 bool changed = false;
-                string pythonExe = Path.Combine(pvsDir, "data", "lib", "python", "python.exe");
                 string pwshExe = Path.Combine(pvsDir, "data", "lib", "pwsh", "pwsh.exe");
-                contents = ReplaceManagedJsonPath(contents, "python.defaultInterpreterPath", pythonExe, @"data\\lib\\python\\python.exe", ref changed);
                 contents = ReplaceManagedJsonPath(contents, "path", pwshExe, @"data\\lib\\pwsh\\pwsh.exe", ref changed);
                 if (originContents != null)
                     contents = RestorePortableTerminalPath(contents, originContents, ref changed);
@@ -761,58 +744,13 @@ namespace VSCodePortableLauncher
                 CheckComponentVersionAsync(pvsDir, versions, "MODERN_UNIX_WIN_VERSION", "upgrade_modern_unix", "modern-unix-win",
                     () => GetLatestPSGalleryVersion("modern-unix-win"), errors, errorsLock),
                 CheckComponentVersionAsync(pvsDir, versions, "VSCODE_VERSION", "upgrade_vscode", "VS Code",
-                    GetLatestVSCodeVersion, errors, errorsLock)
+                    GetLatestVSCodeVersion, errors, errorsLock),
+                CheckComponentVersionAsync(pvsDir, versions, "UV_VERSION", "upgrade_uv", "uv",
+                    PortablePython.GetLatestUvVersionAsync, errors, errorsLock)
             };
-
-            string installedPythonVersion;
-            if (versions.TryGetValue("PYTHON_VERSION", out installedPythonVersion))
-            {
-                try
-                {
-                    string majorMinor = GetPythonMajorMinor(installedPythonVersion);
-                    checks.Add(CheckPythonVersionAsync(pvsDir, majorMinor, installedPythonVersion, errors, errorsLock));
-                }
-                catch (ArgumentException)
-                {
-                    errors.Add("Python: stored version is not a numeric version; patch updates were skipped.");
-                }
-            }
 
             await Task.WhenAll(checks);
             return errors;
-        }
-
-        static async Task CheckPythonVersionAsync(string pvsDir, string majorMinor, string currentVersion, List<string> errors, object errorsLock)
-        {
-            try
-            {
-                string latestVersion = await CommonHelper.GetLatestPythonPatchVersionAsync(majorMinor);
-                string flagPath = Path.Combine(pvsDir, "upgrade_python");
-                if (string.IsNullOrWhiteSpace(latestVersion))
-                {
-                    if (File.Exists(flagPath))
-                        File.Delete(flagPath);
-                    return;
-                }
-
-                if (IsVersionNewer(latestVersion, currentVersion))
-                    WriteUpgradeFlag(flagPath, latestVersion);
-                else if (File.Exists(flagPath))
-                    File.Delete(flagPath);
-            }
-            catch (Exception ex)
-            {
-                lock (errorsLock)
-                    errors.Add("Python: " + ex.Message);
-            }
-        }
-
-        static string GetPythonMajorMinor(string version)
-        {
-            Version parsed;
-            if (!Version.TryParse(version, out parsed) || parsed.Build < 0)
-                throw new ArgumentException("Python version is not numeric.", "version");
-            return parsed.Major + "." + parsed.Minor;
         }
 
         static async Task CheckComponentVersionAsync(
@@ -961,38 +899,37 @@ namespace VSCodePortableLauncher
         static int InitializePVS()
         {
             string pvsDir = AppDomain.CurrentDomain.BaseDirectory;
-            
+
             try
             {
                 Console.WriteLine("Initializing PVS environment...");
-                
+
                 // 1. Sync VSCode extensions
                 Console.WriteLine("1/6: Synchronizing VSCode extensions...");
                 SyncVSCodeExtensions(pvsDir);
-                
+
                 // 2. Restore origin files
                 Console.WriteLine("2/6: Restoring configuration files...");
                 RestoreOriginFiles(pvsDir);
                 string themeError;
                 if (!EnsurePortablePowerShellTheme(pvsDir, out themeError))
                     Console.WriteLine("  Could not prepare Oh My Posh theme: " + themeError);
-                
+
                 // 3. Clean Python environment
-                Console.WriteLine("3/6: Cleaning Python environment...");
-                CleanPythonEnvironment(pvsDir);
-                
+                Console.WriteLine("3/6: Preserving user Python runtimes and project environments...");
+
                 // 4. Install fonts and create shortcuts
                 Console.WriteLine("4/6: Installing fonts and creating shortcuts...");
                 InstallFontsAndShortcuts(pvsDir);
-                
+
                 // 5. Clean user-data (except settings.json)
                 Console.WriteLine("5/6: Cleaning user data...");
                 CleanUserData(pvsDir);
-                
+
                 // 6. Launch VSCode
                 Console.WriteLine("6/6: Launching VSCode...");
                 LaunchVSCodeAndExit(pvsDir);
-                
+
                 Console.WriteLine("PVS initialization completed successfully!");
                 return 0;
             }
@@ -1043,7 +980,7 @@ namespace VSCodePortableLauncher
                         installedDirs.Remove(invalidInstall);
                     }
                 }
-                
+
                 // Find extensions to remove (not in required list)
                 var toRemove = installedDirs.Where(installed =>
                 {
@@ -1138,7 +1075,8 @@ namespace VSCodePortableLauncher
             if (string.IsNullOrEmpty(extensionPath) || string.IsNullOrEmpty(extensionId) || !Directory.Exists(extensionPath))
                 return false;
 
-            if (!PlatformSensitiveVSCodeExtensions.Any(ext => string.Equals(ext, extensionId, StringComparison.OrdinalIgnoreCase)))
+            if (!string.Equals(extensionId, "ms-python.python", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(extensionId, "ms-python.vscode-python-envs", StringComparison.OrdinalIgnoreCase))
                 return true;
 
             string toolsDir = Path.Combine(extensionPath, "python-env-tools", "bin");
@@ -1248,43 +1186,6 @@ namespace VSCodePortableLauncher
             }
         }
 
-        static void CleanPythonEnvironment(string pvsDir)
-        {
-            try
-            {
-                // Delete Scripts folder
-                string scriptsDir = Path.Combine(pvsDir, "data", "lib", "python", "Scripts");
-                if (Directory.Exists(scriptsDir))
-                {
-                    Directory.Delete(scriptsDir, true);
-                    Console.WriteLine("  Deleted: Scripts folder");
-                }
-
-                // Clean site-packages (keep only pip*)
-                string sitePackages = Path.Combine(pvsDir, "data", "lib", "python", "Lib", "site-packages");
-                if (Directory.Exists(sitePackages))
-                {
-                    var items = Directory.GetFileSystemEntries(sitePackages);
-                    foreach (var item in items)
-                    {
-                        string name = Path.GetFileName(item);
-                        if (!name.StartsWith("pip", StringComparison.OrdinalIgnoreCase))
-                        {
-                            if (Directory.Exists(item))
-                                Directory.Delete(item, true);
-                            else
-                                File.Delete(item);
-                        }
-                    }
-                    Console.WriteLine("  Cleaned: site-packages (kept pip* only)");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("  Python cleanup error: " + ex.Message);
-            }
-        }
-
         static void InstallFontsAndShortcuts(string pvsDir)
         {
             bool fontsReady = EnsureFonts(pvsDir);
@@ -1311,13 +1212,13 @@ namespace VSCodePortableLauncher
 
                 // Get settings.json path to preserve
                 string settingsPath = Path.Combine(userDataDir, "User", "settings.json");
-                
+
                 // Delete all items except User/settings.json
                 var items = Directory.GetFileSystemEntries(userDataDir);
                 foreach (var item in items)
                 {
                     string name = Path.GetFileName(item);
-                    
+
                     if (name.Equals("User", StringComparison.OrdinalIgnoreCase))
                     {
                         // Keep User folder but clean its contents except settings.json
@@ -1342,7 +1243,7 @@ namespace VSCodePortableLauncher
                             File.Delete(item);
                     }
                 }
-                
+
                 Console.WriteLine("  Cleaned: user-data (kept settings.json)");
             }
             catch (Exception ex)
@@ -1359,13 +1260,13 @@ namespace VSCodePortableLauncher
                 if (File.Exists(codeExe))
                 {
                     var psi = CreateVSCodeStartInfo(pvsDir);
-                    
+
                     using (var process = Process.Start(psi))
                     {
                         // Wait a bit for VSCode to initialize
                         System.Threading.Thread.Sleep(2000);
                     }
-                    
+
                     Console.WriteLine("  VSCode launched");
                 }
             }

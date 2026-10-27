@@ -165,6 +165,9 @@ namespace VSCodePortableInstaller
             this.pythonVersionTextBox.Location = new System.Drawing.Point(128, 46);
             this.pythonVersionTextBox.Name = "pythonVersionTextBox";
             this.pythonVersionTextBox.Size = new System.Drawing.Size(150, 23);
+            this.pythonVersionTextBox.ReadOnly = true;
+            this.pythonVersionTextBox.TabStop = false;
+            this.pythonVersionTextBox.Text = "Latest stable";
             this.pythonVersionTextBox.TabIndex = 2;
             //
             // pythonHint
@@ -174,7 +177,7 @@ namespace VSCodePortableInstaller
             this.pythonHint.Location = new System.Drawing.Point(284, 49);
             this.pythonHint.Name = "pythonHint";
             this.pythonHint.Size = new System.Drawing.Size(200, 18);
-            this.pythonHint.Text = "(e.g. 3.12  or leave empty for latest)";
+            this.pythonHint.Text = "uv / CPython";
             this.pythonHint.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             //
             // label1

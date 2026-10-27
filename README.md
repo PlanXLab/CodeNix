@@ -18,7 +18,7 @@ The final distributable is `CodeNix.exe` only. `launcher.exe` is embedded into t
 `CodeNix.exe` installs the latest available versions of the following components:
 
 - VS Code
-- Python Embedded
+- uv and the latest stable uv-managed Windows x64 CPython
 - PowerShell 7
 - Oh My Posh
 - PowerShell modules: `PSFzf`, `modern-unix-win`
@@ -28,6 +28,8 @@ The final distributable is `CodeNix.exe` only. `launcher.exe` is embedded into t
   - `zhuangtongfa.material-theme`
   - `ms-python.python`
   - `ms-python.vscode-pylance`
+  - `ms-python.vscode-python-envs`
+  - `ms-python.debugpy`
   - `KevinRose.vsc-python-indent`
   - `usernamehw.errorlens`
 
@@ -38,9 +40,9 @@ Oh My Posh is initialized with the bundled theme at `data\lib\pwsh\ohmyposh\them
 Installer UI behavior:
 
 - Default installation path is `C:\VSCode`
-- Enter a Python `3.x` major.minor version, or leave the field empty for the latest Windows embeddable release
-- CodeNix verifies the embeddable package before installation; if it is unavailable, it asks for another version before installing any packages
-- Pressing `Enter` in the Python version field starts installation immediately
+- The Python version is selected automatically from stable uv-managed CPython releases
+- The resolved version is displayed in a read-only field during installation
+- The uv archive is verified against the release's SHA256 digest
 - The UI provides overall progress, per-component progress, and a filtered Key Events log
 
 ### Launcher
@@ -58,7 +60,7 @@ Move the entire installation folder to another PC, then run `launcher.exe` once.
 
 Upgradeable components:
 
-- Python patch releases with a Windows embeddable package (the installed major.minor version is preserved)
+- uv (Python runtimes and project packages are never automatically upgraded)
 - PowerShell 7
 - Oh My Posh
 - PSFzf
@@ -73,6 +75,8 @@ The installation root contains the following runtime files:
 - `codenix.log`: installation log
 - `upgrade.log`: upgrade log
 - `upgrade_*`: launcher-generated upgrade flag files
+
+`PYTHON_VERSION` records the initially installed runtime for diagnostics; it is not a version pin or an update target. Users can add or remove any runtime with uv, including the last runtime or one referenced by a project. CodeNix does not prevent deletion, silently choose a replacement, or reinstall a deleted runtime. VS Code and PowerShell can still launch with no Python runtimes installed.
 
 ## Installed Folder Layout
 
@@ -101,7 +105,7 @@ A typical installed layout looks like this:
 ### End Users
 
 1. Download `CodeNix.exe` from GitHub Releases.
-2. Run it and choose the installation path and Python version.
+2. Run it and choose the installation path. uv and the latest stable CPython are installed automatically.
 3. After installation, launch VS Code through `launcher.exe` or the created shortcut.
 4. From that point on, `launcher.exe` checks for updates and handles upgrades.
 
@@ -111,7 +115,7 @@ A typical installed layout looks like this:
 
 - Synchronizes the VS Code extension set
 - Restores configuration and origin files
-- Cleans the Python environment
+- Preserves user Python runtimes, caches, and project environments
 - Reinstalls fonts and recreates shortcuts
 - Cleans user-data and launches VS Code
 
@@ -141,7 +145,7 @@ Path completion expands intermediate directory prefixes, not just the final comp
 
 A drive prefix such as `D:` starts completion at that drive's root. Without a colon, completion starts in the current directory and stays relative: `cd Code` can complete to `cd CodeNix\`. Likewise, `D/P/O/W/g` only searches matching local subdirectories; it never falls back to drive D. If no local match exists, the input is left unchanged. Directory completions retain a trailing separator so another component can be entered immediately.
 
-Python filenames entered directly remain unchanged on screen and in history. A `#!replx` shebang selects `replx`; otherwise `python` runs synchronously in the current terminal.
+Python filenames entered directly remain unchanged on screen and in history. Scripts run synchronously with the active virtual environment, or the nearest project `.venv`. A `#!replx` shebang requires `replx` to be installed in that same environment.
 
 ### Navigation
 
@@ -224,14 +228,26 @@ The installer upgrades bundled lsd versions older than 1.2.0 using the official 
 
 ### Running Python Scripts
 
-The portable Python runtime enables `site` in its `python3xy._pth` configuration and installs a small site hook. It adds the current working directory and the launched script's directory to `sys.path`, so modules in the active workspace can be imported without a machine-wide `PYTHONPATH`.
+Every Python project uses its own virtual environment. For example, from a project directory:
+
+```powershell
+uv venv --python 3.15 --relocatable
+uv pip install --python .venv idna
+. .\.venv\Scripts\Activate.ps1
+```
+
+Request another Python version in `uv venv --python <version>` when needed. uv stores runtimes under `data\lib\python`, and the default selection is not fixed by CodeNix. VS Code uses the project's `.venv`; its Python Environments extension automatically activates the selected environment in new terminals. Runtime changes require selecting or recreating a project environment, not changing a global Python path.
+
+The shared uv cache is at `data\cache\uv`. Compatible package files are reused through hardlinks when the cache and environment are on a supporting filesystem on the same volume. Package installation state and uninstall operations remain independent per environment. Cross-volume or unsupported filesystems may require copies. Do not edit cached or hardlinked package files in place.
+
+Keep portable projects under `<install-root>\projects`. On launch, CodeNix rebases moved `.venv` environments there only when the exact original runtime exists in the current portable store. The PowerShell script runner also checks moved environments for scripts outside that directory. Rebasing uses `--allow-existing --no-python-downloads` to preserve packages and never downloads a replacement for a deleted runtime. Standard virtual environments with non-relocatable console scripts may need recreation after a move.
 
 Python scripts can be run directly from the terminal without typing `python`:
 
 ```powershell
-foo.py          # runs: python foo.py
-./foo.py        # runs: python ./foo.py
-./ch1/foo.py    # runs: python ./ch1/foo.py
+foo.py
+./foo.py
+./ch1/foo.py
 ```
 
 If the first line of the script is exactly `#!replx`, it is executed with `replx` instead:
@@ -242,5 +258,19 @@ print("Hello from replx")
 ```
 
 ```powershell
-foo.py    # runs: replx foo.py
+foo.py
 ```
+
+No project environment means the script runner reports an error instead of falling back to a machine-wide Python. `uv run` outside a project is not itself a guarantee of virtual-environment execution.
+
+## Build and Verification
+
+Windows and the .NET Framework C# compiler are required. The build embeds `launcher.exe` into `dist\CodeNix.exe`.
+
+```powershell
+.\.test\build.ps1
+.\.test\runtime.Tests.ps1
+.\.test\runtime.Tests.ps1 -Network
+```
+
+The network suite installs uv and CPython in a disposable directory and verifies package reuse, isolated removal, uv-only replacement, last-runtime deletion, and moved-environment rebasing. This is a new installation format; upgrading installations from the previous Embedded Python/pip layout is not supported.

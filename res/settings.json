@@ -39,10 +39,7 @@
   "terminal.explorerKind": "integrated",
   "terminal.integrated.suggest.enabled": false,
   "terminal.integrated.minimumContrastRatio": 1,
-  "terminal.integrated.env.windows": {
-    "PATH": "${env:VSCODE_PORTABLE}\\..\\bin;${env:VSCODE_PORTABLE}\\lib\\python;${env:VSCODE_PORTABLE}\\lib\\python\\Scripts;${env:VSCODE_PORTABLE}\\lib\\pwsh;${env:VSCODE_PORTABLE}\\lib\\pwsh\\bin;${env:PATH}"
-  },
-  
+
   "terminal.integrated.sendKeybindingsToShell": true,
   "terminal.integrated.commandsToSkipShell": [
     "-workbench.action.quickOpenNavigateNextInRecentFilesPicker",
@@ -50,7 +47,7 @@
   ],
   "terminal.integrated.allowChords": false,
   "terminal.integrated.shellIntegration.enabled": false,
-  
+
   "terminal.integrated.defaultProfile.windows": "PowerShell 7 (portable)",
 
   "terminal.integrated.profiles.windows": {
@@ -67,11 +64,10 @@
     }
   },
 
-  "python.defaultInterpreterPath": "python",
-  "python.terminal.activateEnvironment": false,
-  "python.venvFolders": [],
-  "python.useEnvironmentsExtension": false,
-  "python.createEnvironment.trigger": "off",
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv",
+  "python.useEnvironmentsExtension": true,
+  "python-envs.alwaysUseUv": true,
+  "python-envs.terminal.autoActivationType": "command",
   "python.analysis.diagnosticSeverityOverrides": {
     "reportMissingModuleSource": "none"
   },

@@ -34,6 +34,7 @@ namespace VSCodePortableLauncher
             "ms-python.python",
             "ms-python.vscode-pylance",
             "ms-python.vscode-python-envs",
+            "ms-python.debugpy",
             "KevinRose.vsc-python-indent",
             "usernamehw.errorlens"
         };
@@ -111,7 +112,7 @@ namespace VSCodePortableLauncher
             headerPanel.MouseDown += HeaderPanel_MouseDown;
             headerTitleLabel.MouseDown += HeaderPanel_MouseDown;
             headerSubLabel.MouseDown += HeaderPanel_MouseDown;
-            
+
             // Initialize table with pending upgrades
             InitializePendingUpgradesTable();
             UpdateCurrentTask("Ready to upgrade");
@@ -140,7 +141,7 @@ namespace VSCodePortableLauncher
         {
             var componentMap = new Dictionary<string, string>
             {
-                { "upgrade_python", "Python" },
+                { "upgrade_uv", "uv" },
                 { "upgrade_pwsh7", "PowerShell 7" },
                 { "upgrade_ohmyposh", "Oh My Posh" },
                 { "upgrade_psfzf", "PSFzf" },
@@ -240,7 +241,7 @@ namespace VSCodePortableLauncher
 
                 // Terminate Code.exe if pwsh7 or vscode upgrade is needed
                 bool hasPwsh7Upgrade = pendingUpgrades.Contains("upgrade_pwsh7");
-                bool hasPythonUpgrade = pendingUpgrades.Contains("upgrade_python");
+                bool hasPythonUpgrade = pendingUpgrades.Contains("upgrade_uv");
                 bool hasOhMyPoshUpgrade = pendingUpgrades.Contains("upgrade_ohmyposh");
                 bool hasModuleUpgrade = pendingUpgrades.Any(f => f == "upgrade_ohmyposh" || f == "upgrade_psfzf" || f == "upgrade_modern_unix");
                 bool hasVSCodeUpgrade = pendingUpgrades.Contains("upgrade_vscode");
@@ -307,7 +308,7 @@ namespace VSCodePortableLauncher
                     if (hasVSCodeUpgrade)
                         phase1Tasks.Add(UpgradeVSCodeAsync());
                     if (hasPythonUpgrade)
-                        phase1Tasks.Add(UpgradePythonAsync());
+                        phase1Tasks.Add(UpgradeUvAsync());
                     var phase1Results = await Task.WhenAll(phase1Tasks);
                     allResults.AddRange(phase1Results.Where(r => !string.IsNullOrEmpty(r.Value)));
 
@@ -342,7 +343,7 @@ namespace VSCodePortableLauncher
                     parallelTasks.Add(UpgradeVSCodeAsync());
 
                 if (hasPythonUpgrade && !(hasPwsh7Upgrade && hasModuleUpgrade))
-                    parallelTasks.Add(UpgradePythonAsync());
+                    parallelTasks.Add(UpgradeUvAsync());
 
                 if (parallelTasks.Any())
                 {
@@ -418,10 +419,10 @@ namespace VSCodePortableLauncher
                 LogActivity("Upgrade error: " + ex.Message);
                 SaveUpgradeLog();
                 ShowError("Upgrade error: " + ex.Message);
-                
+
                 // Stop elapsed timer
                 StopElapsedTimer();
-                
+
                 upgradeStarted = false;
                 upgradeCompleted = false;
                 Invoke(new Action(() =>
@@ -446,7 +447,7 @@ namespace VSCodePortableLauncher
 
             var componentMap = new Dictionary<string, Tuple<Label, Label, ProgressBar>>
             {
-                { "Python", Tuple.Create(pythonNameLabel, pythonStatusLabel, pythonProgressBar) },
+                { "uv", Tuple.Create(pythonNameLabel, pythonStatusLabel, pythonProgressBar) },
                 { "PowerShell 7", Tuple.Create(pwsh7NameLabel, pwsh7StatusLabel, pwsh7ProgressBar) },
                 { "Oh My Posh", Tuple.Create(ohmyposhNameLabel, ohmyposhStatusLabel, ohmyposhProgressBar) },
                 { "PSFzf", Tuple.Create(psfzfNameLabel, psfzfStatusLabel, psfzfProgressBar) },
@@ -463,7 +464,7 @@ namespace VSCodePortableLauncher
                 kvp.Value.Item1.Enabled = shouldEnable;
                 kvp.Value.Item2.Enabled = shouldEnable;
                 kvp.Value.Item3.Enabled = shouldEnable;
-                
+
                 if (shouldEnable)
                 {
                     kvp.Value.Item1.Text = GetDisplayComponentName(kvp.Key);
@@ -533,7 +534,7 @@ namespace VSCodePortableLauncher
                     statusLabel = pwsh7StatusLabel;
                     progressBar = pwsh7ProgressBar;
                     break;
-                case "Python":
+                case "uv":
                     statusLabel = pythonStatusLabel;
                     progressBar = pythonProgressBar;
                     break;
@@ -905,37 +906,27 @@ namespace VSCodePortableLauncher
             }
         }
 
-        private async Task<KeyValuePair<string, string>> UpgradePythonAsync()
+        private async Task<KeyValuePair<string, string>> UpgradeUvAsync()
         {
-            const string component = "Python";
+            const string component = "uv";
             try
             {
-                string currentVersion;
-                if (!versions.TryGetValue("PYTHON_VERSION", out currentVersion))
-                    throw new InvalidDataException("Python version is missing from " + CommonHelper.RuntimeInfoFileName + ".");
-
-                string targetVersionPath = Path.Combine(pvsDir, "upgrade_python");
+                string targetVersionPath = Path.Combine(pvsDir, "upgrade_uv");
                 if (!File.Exists(targetVersionPath))
                     throw new FileNotFoundException("Python update version flag was not found.", targetVersionPath);
 
                 string targetVersion = File.ReadAllText(targetVersionPath).Trim();
-                var installer = new PythonInstaller(
-                    pvsDir,
-                    (name, status, progress) => UpdateComponentStatus(component, ConvertStatus(status), progress),
-                    message => LogActivity(message));
-
-                var result = await installer.UpgradeAsync(currentVersion, targetVersion);
-                if (string.IsNullOrWhiteSpace(result.Value))
-                    throw new InvalidOperationException("Python patch update did not complete.");
-
+                UpdateComponentStatus(component, "Installing...", 10);
+                string installedVersion = await PortablePython.InstallUvAsync(pvsDir, targetVersion,
+                    default(System.Threading.CancellationToken), message => LogActivity("uv: " + message));
                 UpdateComponentStatus(component, "Completed", 100);
-                LogActivity("Python: Upgrade completed - version " + result.Value);
-                return result;
+                LogActivity("uv: Upgrade completed - version " + installedVersion);
+                return new KeyValuePair<string, string>("UV_VERSION", installedVersion);
             }
             catch (Exception ex)
             {
                 UpdateComponentStatus(component, "Error", 0);
-                LogActivity("Python: Error - " + ex.Message);
+                LogActivity("uv: Error - " + ex.Message);
                 return new KeyValuePair<string, string>();
             }
         }
@@ -1062,7 +1053,7 @@ namespace VSCodePortableLauncher
             switch (versionKey)
             {
                 case "PWSH7_VERSION": return "upgrade_pwsh7";
-                case "PYTHON_VERSION": return "upgrade_python";
+                case "UV_VERSION": return "upgrade_uv";
                 case "OHMYPOSH_VERSION": return "upgrade_ohmyposh";
                 case "PSFZF_VERSION": return "upgrade_psfzf";
                 case "MODERN_UNIX_WIN_VERSION": return "upgrade_modern_unix";
