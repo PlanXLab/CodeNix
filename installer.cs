@@ -236,6 +236,23 @@ namespace VSCodePortableInstaller
             InstallButton_Click(installButton, EventArgs.Empty);
         }
 
+        private bool ValidatePythonVersionInput()
+        {
+            string requestedVersion = pythonVersionTextBox.Text.Trim();
+            if (PortablePython.IsValidPythonVersionRequest(requestedVersion))
+                return true;
+
+            MessageBox.Show(this,
+                "Enter a Python version as x.y or x.y.z (for example, 3.13 or 3.13.2). " +
+                "A single major version such as 3 is incomplete; leave it blank for the latest stable version.",
+                "Invalid Python Version",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            pythonVersionTextBox.Focus();
+            pythonVersionTextBox.SelectAll();
+            return false;
+        }
+
         private async void InstallButton_Click(object sender, EventArgs e)
         {
             // If installation completed and no failures, Exit button closes the form
@@ -255,11 +272,16 @@ namespace VSCodePortableInstaller
             // If critical components failed, retry full installation
             if (installCompleted && criticalFailed)
             {
+                if (!ValidatePythonVersionInput())
+                    return;
                 RetryInstallation();
                 return;
             }
 
             if (installStarted)
+                return;
+
+            if (!ValidatePythonVersionInput())
                 return;
 
             // New behavior: if form was collapsed at start, expand to full UI when Install is pressed
@@ -273,6 +295,7 @@ namespace VSCodePortableInstaller
             // Validate path format
             if (!ValidateInstallPath(path))
                 return;
+            string requestedPythonVersion = pythonVersionTextBox.Text.Trim();
 
             cancelButton.Enabled = true;
             installDir = path;
@@ -302,7 +325,7 @@ namespace VSCodePortableInstaller
 
             // Start installation
             var token = installCancellationSource.Token;
-            await Task.Run(() => PerformInstallation(token));
+            await Task.Run(() => PerformInstallation(token, requestedPythonVersion));
         }
 
         private void CancelButton_Click(object sender, EventArgs e)
@@ -816,7 +839,8 @@ namespace VSCodePortableInstaller
             base.OnFormClosing(e);
         }
 
-        private async Task PerformInstallation(System.Threading.CancellationToken cancellationToken)
+        private async Task PerformInstallation(System.Threading.CancellationToken cancellationToken,
+            string requestedPythonVersion)
         {
             try
             {
@@ -844,7 +868,7 @@ namespace VSCodePortableInstaller
                 LogActivity("Phase 1A: Installing Fonts and Python...");
                 var phase1Results = await Task.WhenAll(
                     InstallFontsAsync(cancellationToken),
-                    InstallPythonCoreAsync(cancellationToken));
+                    InstallPythonCoreAsync(cancellationToken, requestedPythonVersion));
 
                 // Phase 1B: Installing VSCode and PowerShell 7...
                 LogActivity("Phase 1B: Installing VSCode and PowerShell 7...");
@@ -876,7 +900,8 @@ namespace VSCodePortableInstaller
                     failedCount++;
                 }
 
-                if (!allVersions.ContainsKey("PYTHON_VERSION"))
+                bool pythonFailed = !allVersions.ContainsKey("PYTHON_VERSION");
+                if (pythonFailed)
                 {
                     LogActivity("Critical: Python installation failed or incomplete");
                     hasCriticalError = true;
@@ -894,6 +919,8 @@ namespace VSCodePortableInstaller
                     installCompleted = true;
                     Invoke(new Action(() =>
                     {
+                        if (pythonFailed)
+                            pythonVersionTextBox.Enabled = true;
                         RestoreInstallButtonStyle("Retry");
                         // Keep Cancel button enabled so user can always exit
                     }));
@@ -1500,6 +1527,7 @@ namespace VSCodePortableInstaller
 
         private void RetryInstallation()
         {
+            string requestedPythonVersion = pythonVersionTextBox.Text.Trim();
             LogActivity("=== Retrying failed components ===");
             criticalFailed = false;
             installCompleted = false;
@@ -1512,6 +1540,7 @@ namespace VSCodePortableInstaller
             Invoke(new Action(() =>
             {
                 SetInstallButtonInstallingState();
+                pythonVersionTextBox.Enabled = false;
             }));
 
             // Only retry components that failed (not re-install successful ones)
@@ -1561,13 +1590,14 @@ namespace VSCodePortableInstaller
                     if (needPython)
                     {
                         LogActivity("Retrying Python installation...");
-                        var pythonVersions = await InstallPythonCoreAsync(token);
+                        var pythonVersions = await InstallPythonCoreAsync(token, requestedPythonVersion);
                         foreach (var kvp in pythonVersions)
                             allVersions[kvp.Key] = kvp.Value;
                     }
 
                     // Check if retry succeeded
-                    if (!allVersions.ContainsKey("VSCODE_VERSION") || !allVersions.ContainsKey("PYTHON_VERSION"))
+                    bool pythonFailed = !allVersions.ContainsKey("PYTHON_VERSION");
+                    if (!allVersions.ContainsKey("VSCODE_VERSION") || pythonFailed)
                     {
                         int failedCount = 0;
                         if (!allVersions.ContainsKey("VSCODE_VERSION"))
@@ -1588,6 +1618,8 @@ namespace VSCodePortableInstaller
                         installCompleted = true;
                         Invoke(new Action(() =>
                         {
+                            if (pythonFailed)
+                                pythonVersionTextBox.Enabled = true;
                             RestoreInstallButtonStyle("Retry");
                         }));
                         return;
@@ -1835,6 +1867,7 @@ namespace VSCodePortableInstaller
             }
 
             LogActivity("PowerShell 7: pwsh.exe verified successfully");
+            InstallPipWrapper();
             UpdateComponentStatus("PowerShell 7", "Core installed", 60);
 
             return versions;
@@ -2108,7 +2141,8 @@ namespace VSCodePortableInstaller
             return versions;
         }
 
-        private async Task<Dictionary<string, string>> InstallPythonCoreAsync(System.Threading.CancellationToken cancellationToken)
+        private async Task<Dictionary<string, string>> InstallPythonCoreAsync(
+            System.Threading.CancellationToken cancellationToken, string requestedPythonVersion)
         {
             var versions = new Dictionary<string, string>();
             try
@@ -2118,13 +2152,17 @@ namespace VSCodePortableInstaller
                 string uvVersion = await PortablePython.InstallUvAsync(installDir, null, cancellationToken,
                     message => LogActivity("uv: " + message));
                 UpdateComponentStatus("Python", "Installing CPython...", 45);
-                string pythonVersion = await PortablePython.InstallLatestPythonAsync(installDir, cancellationToken,
+                string pythonVersion = await PortablePython.InstallPythonAsync(installDir, requestedPythonVersion, cancellationToken,
                     version =>
                     {
                         LogActivity("Python: Selected stable CPython " + version);
                         if (!IsDisposed && IsHandleCreated)
-                            BeginInvoke(new Action(() => pythonVersionTextBox.Text = version));
+                           Invoke(new Action(() => pythonVersionTextBox.Text = version));
                     }, message => LogActivity("Python: " + message));
+                UpdateComponentStatus("Python", "Creating global pip environment...", 85);
+                string globalEnvironment = await PortablePython.EnsureGlobalEnvironmentAsync(installDir, pythonVersion,
+                    cancellationToken, message => LogActivity("Python: " + message));
+                LogActivity("Python: Global pip environment ready at " + globalEnvironment);
                 versions["UV_VERSION"] = uvVersion;
                 versions["PYTHON_VERSION"] = pythonVersion;
                 Directory.CreateDirectory(Path.Combine(installDir, "projects"));
@@ -2133,7 +2171,7 @@ namespace VSCodePortableInstaller
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                LogActivity("Python: uv installation failed - " + ex.Message);
+                LogActivity("Python: Installation failed - " + ex.Message);
                 UpdateComponentStatus("Python", "Failed: " + ex.Message, 0);
             }
             return versions;
@@ -2303,7 +2341,6 @@ namespace VSCodePortableInstaller
                 var extensions = new List<string>
                 {
                     "teabyii.ayu",
-                    "zhuangtongfa.material-theme",
                     "ms-python.python",
                     "ms-python.vscode-pylance",
                     "ms-python.vscode-python-envs",
@@ -3231,6 +3268,19 @@ namespace VSCodePortableInstaller
                 LogActivity("Error copying launcher: " + ex.Message);
                 throw;
             }
+        }
+
+        private void InstallPipWrapper()
+        {
+            string script = ReadEmbeddedResource("pip.ps1");
+            if (script == null)
+                throw new InvalidDataException("The embedded pip.ps1 resource is missing.");
+
+            string binDirectory = Path.Combine(installDir, "data", "lib", "pwsh", "bin");
+            Directory.CreateDirectory(binDirectory);
+            string scriptPath = Path.Combine(binDirectory, "pip.ps1");
+            File.WriteAllText(scriptPath, script, new UTF8Encoding(false));
+            LogActivity("PowerShell 7: Installed pip.ps1 at " + scriptPath);
         }
 
         private string ReadEmbeddedResource(string resourceName)

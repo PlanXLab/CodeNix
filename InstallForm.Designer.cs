@@ -92,7 +92,7 @@ namespace VSCodePortableInstaller
             this.headerSubLabel.ForeColor = System.Drawing.Color.FromArgb(176, 210, 240);
             this.headerSubLabel.Location = new System.Drawing.Point(22, 38);
             this.headerSubLabel.Name = "headerSubLabel";
-            this.headerSubLabel.Text = "Portable Development Environment Installer";
+            this.headerSubLabel.Text = "Sets up a portable VSCode, pwsh, and Python (uv) environment.";
             //
             // settingsPanel
             //
@@ -165,9 +165,7 @@ namespace VSCodePortableInstaller
             this.pythonVersionTextBox.Location = new System.Drawing.Point(128, 46);
             this.pythonVersionTextBox.Name = "pythonVersionTextBox";
             this.pythonVersionTextBox.Size = new System.Drawing.Size(150, 23);
-            this.pythonVersionTextBox.ReadOnly = true;
-            this.pythonVersionTextBox.TabStop = false;
-            this.pythonVersionTextBox.Text = "Latest stable";
+            this.pythonVersionTextBox.Text = "";
             this.pythonVersionTextBox.TabIndex = 2;
             //
             // pythonHint
@@ -177,7 +175,7 @@ namespace VSCodePortableInstaller
             this.pythonHint.Location = new System.Drawing.Point(284, 49);
             this.pythonHint.Name = "pythonHint";
             this.pythonHint.Size = new System.Drawing.Size(200, 18);
-            this.pythonHint.Text = "uv / CPython";
+            this.pythonHint.Text = "Blank = latest; enter x.y or x.y.z";
             this.pythonHint.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             //
             // label1
@@ -187,7 +185,7 @@ namespace VSCodePortableInstaller
             this.label1.Location = new System.Drawing.Point(414, 22);
             this.label1.Name = "label1";
             this.label1.Size = new System.Drawing.Size(286, 20);
-            this.label1.Text = "Created by Atticle at PlanX Lab | devcamp@planxlab.com";
+            this.label1.Text = "Created by Atticle at PlanXLab | devcamp@planxlab.com";
             this.label1.TextAlign = System.Drawing.ContentAlignment.MiddleRight;
             //
             // installButton

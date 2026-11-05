@@ -29,16 +29,102 @@ namespace VSCodePortableCommon
             return Path.Combine(baseDir, "data", "lib", "python");
         }
 
+        public static string GlobalEnvironmentDirectory(string baseDir)
+        {
+            return Path.Combine(baseDir, "data", "venvs", "global");
+        }
+
+        public static string GlobalPythonExecutable(string baseDir)
+        {
+            return Path.Combine(GlobalEnvironmentDirectory(baseDir), "Scripts", "python.exe");
+        }
+
         public static string Quote(string value)
         {
             return "\"" + value.Replace("\"", "\\\"").TrimEnd('\\') + "\"";
         }
 
+        public static bool IsValidPythonVersionRequest(string requestedVersion)
+        {
+            if (string.IsNullOrWhiteSpace(requestedVersion))
+                return true;
+
+            string normalized = requestedVersion.Trim();
+            if (!Regex.IsMatch(normalized, @"^[0-9]+\.[0-9]+(?:\.[0-9]+)?$"))
+                return false;
+
+            Version parsed;
+            return Version.TryParse(normalized, out parsed);
+        }
+
         public static string SelectLatestStablePython(string json)
+        {
+            return SelectPythonVersion(json, null);
+        }
+
+        public static string SelectPythonVersion(string json, string requestedVersion)
+        {
+            if (!IsValidPythonVersionRequest(requestedVersion))
+                throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
+
+            string normalizedRequest = string.IsNullOrWhiteSpace(requestedVersion)
+                ? null
+                : requestedVersion.Trim();
+            Version requested = null;
+            if (normalizedRequest != null && !Version.TryParse(normalizedRequest, out requested))
+                throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
+
+            List<Version> versions = GetStablePythonVersions(json);
+            if (versions.Count == 0)
+                throw new InvalidDataException("uv did not provide a stable Windows x64 CPython release.");
+
+            Version selected = null;
+            if (requested == null)
+            {
+                foreach (Version version in versions)
+                {
+                    if (selected == null || version > selected)
+                        selected = version;
+                }
+            }
+            else if (normalizedRequest.Split('.').Length == 2)
+            {
+                foreach (Version version in versions)
+                {
+                    if (version.Major == requested.Major && version.Minor == requested.Minor &&
+                        (selected == null || version > selected))
+                        selected = version;
+                }
+                if (selected == null)
+                    throw new InvalidOperationException("No stable Windows x64 CPython release is available for Python " +
+                        normalizedRequest + ".");
+            }
+            else
+            {
+                foreach (Version version in versions)
+                {
+                    if (version.Equals(requested))
+                    {
+                        selected = version;
+                        break;
+                    }
+                }
+                if (selected == null)
+                    throw new InvalidOperationException("Python " + normalizedRequest +
+                        " is not available as a stable Windows x64 CPython release.");
+            }
+
+            return selected.ToString();
+        }
+
+        private static List<Version> GetStablePythonVersions(string json)
         {
             var serializer = new JavaScriptSerializer();
             var downloads = serializer.Deserialize<Dictionary<string, object>[]>(json);
-            Version latest = null;
+            if (downloads == null)
+                throw new InvalidDataException("uv returned an invalid Python download list.");
+
+            var versions = new List<Version>();
             foreach (var download in downloads)
             {
                 string version = Convert.ToString(download["version"]);
@@ -50,12 +136,9 @@ namespace VSCodePortableCommon
                     !Regex.IsMatch(version, @"^3\.\d+\.\d+$") ||
                     !Version.TryParse(version, out parsed))
                     continue;
-                if (latest == null || parsed > latest)
-                    latest = parsed;
+                versions.Add(parsed);
             }
-            if (latest == null)
-                throw new InvalidDataException("uv did not provide a stable Windows x64 CPython release.");
-            return latest.ToString();
+            return versions;
         }
 
         public static async Task<string> RunAsync(string baseDir, string arguments,
@@ -188,17 +271,47 @@ namespace VSCodePortableCommon
             }
         }
 
-        public static async Task<string> InstallLatestPythonAsync(string baseDir,
+        public static Task<string> InstallLatestPythonAsync(string baseDir,
+            System.Threading.CancellationToken cancellationToken, Action<string> selectedVersion,
+            Action<string> logActivity = null)
+        {
+            return InstallPythonAsync(baseDir, null, cancellationToken, selectedVersion, logActivity);
+        }
+
+        public static async Task<string> InstallPythonAsync(string baseDir, string requestedVersion,
             System.Threading.CancellationToken cancellationToken, Action<string> selectedVersion,
             Action<string> logActivity = null)
         {
             string downloads = await RunAsync(baseDir,
                 "python list --only-downloads --output-format json --no-config cpython@3", cancellationToken).ConfigureAwait(false);
-            string version = SelectLatestStablePython(downloads);
+            string version = SelectPythonVersion(downloads, requestedVersion);
             if (selectedVersion != null) selectedVersion(version);
             await RunAsync(baseDir, "python install cpython-" + version +
                 "-windows-x86_64-none --no-config --no-bin --no-registry", cancellationToken, logActivity).ConfigureAwait(false);
             return version;
+        }
+
+        public static async Task<string> EnsureGlobalEnvironmentAsync(string baseDir, string pythonVersion,
+            System.Threading.CancellationToken cancellationToken, Action<string> logActivity = null)
+        {
+            if (string.IsNullOrWhiteSpace(pythonVersion) ||
+                !Regex.IsMatch(pythonVersion, @"^[0-9]+\.[0-9]+\.[0-9]+$"))
+                throw new ArgumentException("A full managed Python version is required.", "pythonVersion");
+
+            string environmentDirectory = GlobalEnvironmentDirectory(baseDir);
+            string pythonExecutable = GlobalPythonExecutable(baseDir);
+            string configuration = Path.Combine(environmentDirectory, "pyvenv.cfg");
+            if (Directory.Exists(environmentDirectory) &&
+                File.Exists(pythonExecutable) && File.Exists(configuration))
+                return environmentDirectory;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(environmentDirectory));
+            await RunAsync(baseDir, "venv --python " + Quote(pythonVersion) +
+                " --relocatable --allow-existing --no-python-downloads --no-config --no-project " +
+                Quote(environmentDirectory), cancellationToken, logActivity).ConfigureAwait(false);
+            if (!File.Exists(pythonExecutable) || !File.Exists(configuration))
+                throw new InvalidDataException("uv did not create a complete global Python environment: " + environmentDirectory);
+            return environmentDirectory;
         }
 
         public static async Task<bool> RebaseEnvironmentAsync(string baseDir, string environmentDirectory,
@@ -231,8 +344,21 @@ namespace VSCodePortableCommon
 
         public static async Task RebaseProjectsAsync(string baseDir, Action<string> logActivity)
         {
+            if (!File.Exists(UvPath(baseDir))) return;
+
+            string globalEnvironment = GlobalEnvironmentDirectory(baseDir);
+            if (Directory.Exists(globalEnvironment))
+            {
+                try
+                {
+                    if (await RebaseEnvironmentAsync(baseDir, globalEnvironment, default(System.Threading.CancellationToken)).ConfigureAwait(false))
+                        logActivity("Rebased global Python environment: " + globalEnvironment);
+                }
+                catch (Exception ex) { logActivity("Global Python environment was not rebased: " + globalEnvironment + ": " + ex.Message); }
+            }
+
             string projects = Path.Combine(baseDir, "projects");
-            if (!Directory.Exists(projects) || !File.Exists(UvPath(baseDir))) return;
+            if (!Directory.Exists(projects)) return;
             var pending = new Stack<string>();
             pending.Push(projects);
             while (pending.Count > 0)
@@ -355,7 +481,7 @@ namespace VSCodePortableCommon
             subtitleLabel.ForeColor = HeaderSubtitle;
             brandLabel.Font = SmallFont;
             brandLabel.ForeColor = HeaderBrand;
-            brandLabel.Text = "PlanXLab";
+            brandLabel.Text = "© PlanXLab | Dev by Atticle";
             logHeaderLabel.Font = SmallEmphasisFont;
             logHeaderLabel.ForeColor = TextTertiary;
             logHeaderLabel.Text = "ACTIVITY LOG";

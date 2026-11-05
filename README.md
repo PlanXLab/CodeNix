@@ -25,7 +25,6 @@ The final distributable is `CodeNix.exe` only. `launcher.exe` is embedded into t
 - Fonts: `0xProto Nerd Font`, `DalseoHealing`
 - VS Code extensions:
   - `teabyii.ayu`
-  - `zhuangtongfa.material-theme`
   - `ms-python.python`
   - `ms-python.vscode-pylance`
   - `ms-python.vscode-python-envs`
@@ -40,8 +39,8 @@ Oh My Posh is initialized with the bundled theme at `data\lib\pwsh\ohmyposh\them
 Installer UI behavior:
 
 - Default installation path is `C:\VSCode`
-- The Python version is selected automatically from stable uv-managed CPython releases
-- The resolved version is displayed in a read-only field during installation
+- Leave the Python version blank for the latest stable release, enter `x.y` for the latest patch, or enter `x.y.z` for an exact stable release
+- The resolved version replaces the request in the field during installation; unavailable versions can be corrected before retry
 - The uv archive is verified against the release's SHA256 digest
 - The UI provides overall progress, per-component progress, and a filtered Key Events log
 
@@ -92,6 +91,8 @@ A typical installed layout looks like this:
 ├─ data/
 │  ├─ extensions/
 │  ├─ user-data/
+│  ├─ venvs/
+│  │  └─ global/
 │  └─ lib/
 │     ├─ fonts/
 │     ├─ pwsh/
@@ -105,7 +106,7 @@ A typical installed layout looks like this:
 ### End Users
 
 1. Download `CodeNix.exe` from GitHub Releases.
-2. Run it and choose the installation path. uv and the latest stable CPython are installed automatically.
+2. Run it and choose the installation path. Leave the Python version blank for the latest stable CPython, or enter a version as `x.y` or `x.y.z`.
 3. After installation, launch VS Code through `launcher.exe` or the created shortcut.
 4. From that point on, `launcher.exe` checks for updates and handles upgrades.
 
@@ -141,11 +142,11 @@ The prompt has two distinct levels: a framed information header with a path badg
 | `Ctrl+u` / `Ctrl+y` | Delete to the beginning of the line / yank deleted text |
 | `Ctrl+l` / `Ctrl+_` | Clear the screen / undo |
 
-Path completion expands intermediate directory prefixes, not just the final component. For example, `cd D:/P/O/W/g` followed by Tab can expand to `D:/PlanXLabs/OneDrive/Workspace/github/`. Multiple matches remain available in the completion menu. Spaces and literal special characters are quoted safely. This also applies to `pushd` and common PowerShell file commands.
+Path completion expands intermediate directory prefixes, not just the final component. For example, `cd D:/P/O/W/g` followed by Tab can expand to `D:/PlanXLab/Original/Workspace/github/`. Multiple matches remain available in the completion menu. Spaces and literal special characters are quoted safely. This also applies to `pushd` and common PowerShell file commands.
 
 A drive prefix such as `D:` starts completion at that drive's root. Without a colon, completion starts in the current directory and stays relative: `cd Code` can complete to `cd CodeNix\`. Likewise, `D/P/O/W/g` only searches matching local subdirectories; it never falls back to drive D. If no local match exists, the input is left unchanged. Directory completions retain a trailing separator so another component can be entered immediately.
 
-Python filenames entered directly remain unchanged on screen and in history. Scripts run synchronously with the active virtual environment, or the nearest project `.venv`. A `#!replx` shebang requires `replx` to be installed in that same environment.
+Python filenames entered directly remain unchanged on screen and in history. Python commands use an explicitly activated virtual environment when present, otherwise CodeNix's global environment. The profile does not search for or repair project `.venv` environments. A `#!replx` shebang requires `replx` to be installed in the selected environment.
 
 ### Navigation
 
@@ -228,19 +229,40 @@ The installer upgrades bundled lsd versions older than 1.2.0 using the official 
 
 ### Running Python Scripts
 
-Every Python project uses its own virtual environment. For example, from a project directory:
+For project-specific dependencies, use a project virtual environment:
 
 ```powershell
-uv venv --python 3.15 --relocatable
-uv pip install --python .venv idna
-. .\.venv\Scripts\Activate.ps1
+uv init --python 3.12
+uv add replx
+uv run main.py
 ```
 
-Request another Python version in `uv venv --python <version>` when needed. uv stores runtimes under `data\lib\python`, and the default selection is not fixed by CodeNix. VS Code uses the project's `.venv`; its Python Environments extension automatically activates the selected environment in new terminals. Runtime changes require selecting or recreating a project environment, not changing a global Python path.
+Request another Python version in `uv init --python <version>` when needed. uv stores runtimes under `data\lib\python`, and the default selection is not fixed by CodeNix. In VS Code, use **Python: Select Interpreter** to select the project's `.venv\Scripts\python.exe`. The **Run Python File in Terminal** button uses that interpreter directly; CodeNix disables automatic terminal activation in both the Python Environments extension and the legacy Python extension, avoiding activation commands and their execution-policy setup before running a file. Interpreter selection does not activate the terminal's environment.
+
+For terminal commands, either use `uv run` as above (no activation required), or activate the environment explicitly:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python main.py
+```
+
+In an existing installation, set `"python-envs.terminal.autoActivationType": "off"` and `"python.terminal.activateEnvironment": false` in VS Code's user settings, and remove any workspace overrides that re-enable activation. Close existing terminals and open a new one for the settings to take effect. CodeNix does not change execution policy automatically for Python activation; if local policy blocks manual activation, use `uv run` instead. Project environments are not retargeted when runtimes change; the global pip environment remains tied to the runtime selected when it was created.
+
+For pip-style global installs in a CodeNix PowerShell terminal, use the bundled `pip.ps1` wrapper:
+
+```powershell
+pip install requests
+pip install -U requests
+pip list
+pip uninstall requests
+python -c "import requests; print(requests.__version__)"
+```
+
+The wrapper targets one automatically managed environment at `data\venvs\global`; its `Scripts` directory is on the launcher's process PATH, so `python` and package command-line scripts work from any working directory. Packages installed there are separate from each project's `.venv`. The environment uses the Python runtime selected when it was created; removing that runtime can make the global environment unusable until it is restored or recreated.
 
 The shared uv cache is at `data\cache\uv`. Compatible package files are reused through hardlinks when the cache and environment are on a supporting filesystem on the same volume. Package installation state and uninstall operations remain independent per environment. Cross-volume or unsupported filesystems may require copies. Do not edit cached or hardlinked package files in place.
 
-Keep portable projects under `<install-root>\projects`. On launch, CodeNix rebases moved `.venv` environments there only when the exact original runtime exists in the current portable store. The PowerShell script runner also checks moved environments for scripts outside that directory. Rebasing uses `--allow-existing --no-python-downloads` to preserve packages and never downloads a replacement for a deleted runtime. Standard virtual environments with non-relocatable console scripts may need recreation after a move.
+Keep portable projects under `<install-root>\projects`. On launch, CodeNix rebases moved `.venv` environments there only when the exact original runtime exists in the current portable store. Rebasing uses `--allow-existing --no-python-downloads` to preserve packages and never downloads a replacement for a deleted runtime. The PowerShell profile does not repair environments when running scripts. Standard virtual environments with non-relocatable console scripts may need recreation after a move.
 
 Python scripts can be run directly from the terminal without typing `python`:
 
@@ -261,7 +283,7 @@ print("Hello from replx")
 foo.py
 ```
 
-No project environment means the script runner reports an error instead of falling back to a machine-wide Python. `uv run` outside a project is not itself a guarantee of virtual-environment execution.
+Without an explicitly activated environment, direct `.py` execution uses CodeNix's global environment; the profile does not discover or repair nearby project `.venv` environments. Activate a project environment to use it, or use `uv run main.py` for uv's project-specific behavior. Use `uv run replx main.py` to invoke replx explicitly (uv does not interpret the custom `#!replx` marker). `uv run` outside a project is not itself a guarantee of virtual-environment execution.
 
 ## Build and Verification
 

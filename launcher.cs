@@ -30,7 +30,6 @@ namespace VSCodePortableLauncher
         public static readonly string[] VSCODE_EXTENSIONS = new string[]
         {
             "teabyii.ayu",
-            "zhuangtongfa.material-theme",
             "ms-python.python",
             "ms-python.vscode-pylance",
             "ms-python.vscode-python-envs",

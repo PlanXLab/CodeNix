@@ -244,10 +244,12 @@ namespace VSCodePortableLauncher
 
             var preferredPaths = new[]
             {
+                Path.Combine(pvsDir, "data", "lib", "pwsh", "bin"),
+                Path.Combine(pvsDir, "data", "venvs", "global", "Scripts"),
                 Path.Combine(pvsDir, "bin"),
                 Path.Combine(pvsDir, "data", "bin"),
-                Path.Combine(pvsDir, "data", "lib", "pwsh"),
-                Path.Combine(pvsDir, "data", "lib", "pwsh", "bin")
+                Path.Combine(pvsDir, "data", "lib", "uv-tools", "replx", "Scripts"),
+                Path.Combine(pvsDir, "data", "lib", "pwsh")
             };
 
             string basePath = psi.EnvironmentVariables["PATH"];
@@ -275,8 +277,6 @@ namespace VSCodePortableLauncher
             for (int i = preferredPaths.Length - 1; i >= 0; i--)
             {
                 string candidate = preferredPaths[i];
-                if (!Directory.Exists(candidate))
-                    continue;
 
                 bool alreadyPresent = pathEntries.Any(existing =>
                     string.Equals(existing.TrimEnd('\\'), candidate.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));

@@ -2,15 +2,14 @@
   "version": 4,
   "final_space": true,
   "palette": {
-    "path": "#8FB6D8",
-    "drive": "#A5B4C4",
-    "folder": "#56B6C2",
+    "path": "#ABB2BF",
+    "drive": "#C96B33",
+    "folder": "#E5C07B",
     "clean": "#98C379",
-    "changed": "#E5C07B",
+    "changed": "#D19A66",
     "error": "#E06C75",
-    "muted": "#9DA5B4",
-    "rail": "#596574",
-    "surface": "#252B33"
+    "muted": "#7F848E",
+    "rail": "#596574"
   },
   "transient_prompt": {
     "background": "transparent",
@@ -18,7 +17,7 @@
     "foreground_templates": [
       "{{ if gt .Code 0 }}p:error{{ end }}"
     ],
-    "template": "❯ ",
+    "template": "󰶻 ",
     "newline": false
   },
   "blocks": [
@@ -31,38 +30,35 @@
           "type": "text",
           "style": "plain",
           "foreground": "p:rail",
-          "template": "╭─"
+          "template": "╭─╴"
         },
         {
           "type": "session",
           "style": "plain",
           "foreground": "p:muted",
           "foreground_templates": [
-            "{{ if .Root }}p:error{{ end }}"
+            "{{ if .Root }}p:error{{ else if .SSHSession }}p:changed{{ end }}"
           ],
-          "template": "{{ if .Root }} admin {{ else if .SSHSession }} {{ .UserName }}@{{ .HostName }} {{ end }}"
+          "template": "{{ if .Root }} admin <p:rail>·</> {{ else if .SSHSession }} {{ .UserName }}@{{ .HostName }} <p:rail>·</> {{ end }}"
         },
         {
           "type": "path",
-          "style": "diamond",
-          "leading_diamond": "\ue0b6",
-          "trailing_diamond": "\ue0b4",
-          "background": "p:surface",
+          "style": "plain",
           "foreground": "p:path",
           "options": {
             "style": "agnoster_short",
             "max_depth": 2,
             "folder_icon": "…",
-            "folder_separator_icon": "/",
-            "left_format": "<p:drive>%s</>",
+            "folder_separator_icon": "<p:path>/</>",
+            "left_format": "<p:path>%s</>",
             "right_format": "<p:folder>%s</>"
           },
-          "template": "<p:drive>\uf0a0</> {{ .Path }} "
+          "template": "<p:drive></> {{ .Path }} "
         },
         {
           "type": "git",
           "style": "plain",
-          "min_width": 70,
+          "min_width": 60,
           "foreground": "p:clean",
           "foreground_templates": [
             "{{ if or (gt .Working.Unmerged 0) (gt .Staging.Unmerged 0) }}p:error{{ else if or .Working.Changed .Staging.Changed }}p:changed{{ end }}"
@@ -72,9 +68,26 @@
             "fetch_stash_count": true,
             "branch_max_length": 24,
             "truncate_symbol": "…",
-            "branch_icon": "\ue0a0 "
+            "branch_icon": " "
           },
-          "template": " <p:rail>─</> {{ .HEAD }}{{ if gt .Behind 0 }} ↓{{ .Behind }}{{ end }}{{ if gt .Ahead 0 }} ↑{{ .Ahead }}{{ end }}{{ if .Staging.Changed }} S:{{ .Staging.String }}{{ end }}{{ if .Working.Changed }} W:{{ .Working.String }}{{ end }}{{ if gt .StashCount 0 }} ≡{{ .StashCount }}{{ end }} "
+          "template": "<p:rail>╶─╴</> {{ .HEAD }}{{ if gt .Behind 0 }} ↓{{ .Behind }}{{ end }}{{ if gt .Ahead 0 }} ↑{{ .Ahead }}{{ end }}{{ if .Staging.Changed }} +{{ .Staging.String }}{{ end }}{{ if .Working.Changed }} ~{{ .Working.String }}{{ end }}{{ if gt .StashCount 0 }} *{{ .StashCount }}{{ end }} "
+        },
+        {
+          "type": "python",
+          "style": "plain",
+          "foreground": "p:muted",
+          "options": {
+            "display_mode": "environment",
+            "fetch_virtual_env": true,
+            "display_default": false
+          },
+          "template": "<p:rail>╶─╴</>  {{ if .Venv }}{{ .Venv }}{{ else }}{{ .Full }}{{ end }} "
+        },
+        {
+          "type": "text",
+          "style": "plain",
+          "foreground": "p:rail",
+          "template": "╶"
         }
       ]
     },
@@ -87,24 +100,24 @@
         {
           "type": "status",
           "style": "plain",
-          "min_width": 80,
+          "min_width": 60,
           "foreground": "p:error",
           "options": {
             "always_enabled": false
           },
-          "template": " exit {{ .Code }} "
+          "template": "<p:rail>╴</>  {{ .Code }} <p:rail>╶</>"
         },
         {
           "type": "executiontime",
           "style": "plain",
-          "min_width": 80,
+          "min_width": 60,
           "foreground": "p:changed",
           "options": {
             "style": "austin",
-            "threshold": 1000,
+            "threshold": 500,
             "always_enabled": false
           },
-          "template": " {{ .FormattedMs }} "
+          "template": "<p:rail>╴</>  {{ .FormattedMs }} <p:rail>╶</>"
         },
         {
           "type": "time",
@@ -114,13 +127,13 @@
           "options": {
             "time_format": "15:04"
           },
-          "template": " \uf017 {{ .CurrentDate | date .Format }} "
+          "template": "<p:rail>╴</> <p:drive></> {{ .CurrentDate | date .Format }} "
         },
         {
           "type": "text",
           "style": "plain",
           "foreground": "p:rail",
-          "template": "╮"
+          "template": "╶─╮"
         }
       ]
     },
@@ -133,7 +146,7 @@
           "type": "text",
           "style": "plain",
           "foreground": "p:rail",
-          "template": "╰─ "
+          "template": "╰─╴"
         },
         {
           "type": "text",
@@ -142,7 +155,7 @@
           "foreground_templates": [
             "{{ if gt .Code 0 }}p:error{{ end }}"
           ],
-          "template": "❯"
+          "template": "󰶻"
         }
       ]
     },
@@ -154,7 +167,7 @@
           "type": "text",
           "style": "plain",
           "foreground": "p:rail",
-          "template": "─╯"
+          "template": "╶─╯"
         }
       ]
     }

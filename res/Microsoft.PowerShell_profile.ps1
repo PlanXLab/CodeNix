@@ -1,35 +1,25 @@
-# PowerShell profile for the CodeNix portable environment
+# PowerShell profile for the CodeNix portable environment (Optimized v2)
 
+if (-not $Host.UI.SupportsVirtualTerminal -or [Console]::IsOutputRedirected) {
+    return
+}
+
+# PowerShell profile for the CodeNix portable environment
 try {
     [Console]::InputEncoding  = [System.Text.Encoding]::UTF8
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-} catch {
-    Write-Warning "Console encoding could not be configured: $($_.Exception.Message)"
-}
+} catch {}
 
-$Base         = $PSScriptRoot
-$Bin          = "$Base\bin"
-$Modules      = "$Base\Modules"
-$InstallRoot  = [System.IO.Path]::GetFullPath("$Base\..\..\..")
-$PortableData = "$InstallRoot\data"
-$CacheDir     = "$PortableData\cache\pwsh-init"
-
-$UnixModDir = "$Modules\modern-unix-win"
-$UnixBin    = $null
-$modernUnixVersion = $null
-if ([System.IO.Directory]::Exists($UnixModDir)) {
-    $versions = foreach ($directory in [System.IO.Directory]::GetDirectories($UnixModDir)) {
-        $version = $null
-        if ([version]::TryParse([System.IO.Path]::GetFileName($directory), [ref]$version) -and
-            [System.IO.Directory]::Exists("$directory\bin")) {
-            $version
-        }
-    }
-    $modernUnixVersion = $versions | Sort-Object -Descending | Select-Object -First 1
-    if ($modernUnixVersion) {
-        $UnixBin = "$UnixModDir\$modernUnixVersion\bin"
-    }
-}
+$Base                = $PSScriptRoot
+$Bin                 = "$Base\bin"
+$Modules             = "$Base\Modules"
+$InstallRoot         = [System.IO.Path]::GetFullPath("$Base\..\..\..")
+$PortableData        = "$InstallRoot\data"
+$CacheDir            = "$PortableData\cache\pwsh-init"
+$OmpCacheDir         = "$PortableData\cache\oh-my-posh"
+$env:POSH_CACHE_PATH = $OmpCacheDir
+$env:POSH_THEME      = "$PortableData\lib\pwsh\ohmyposh\themes\tos-therm.omp.json"
+$env:BAT_THEME       = 'ansi'
 
 function Add-PortablePath ([string]$Name, [string[]]$Directories) {
     $entries = [Environment]::GetEnvironmentVariable($Name, 'Process') -split ';'
@@ -43,123 +33,124 @@ function Add-PortablePath ([string]$Name, [string[]]$Directories) {
     [Environment]::SetEnvironmentVariable($Name, ($paths -join ';'), 'Process')
 }
 
-Add-PortablePath 'Path' @($Bin, $UnixBin)
-Add-PortablePath 'PSModulePath' @($Modules)
+# Unified Static Cache (.ps1 direct dot-sourcing without [scriptblock]::Create)
+$UnifiedCacheFile = "$CacheDir\codenix-fast-init-v2.ps1"
 
-$pythonStorage = @{
-    UV_PYTHON_INSTALL_DIR = "$PortableData\lib\python"
-    UV_CACHE_DIR = "$PortableData\cache\uv"
-    UV_PYTHON_CACHE_DIR = "$PortableData\cache\python"
-    UV_TOOL_DIR = "$PortableData\lib\uv-tools"
-    UV_TOOL_BIN_DIR = "$PortableData\bin"
-    UV_CREDENTIALS_DIR = "$PortableData\uv\credentials"
-    UV_PYTHON_BIN_DIR = "$PortableData\bin"
-    UV_PYTHON_INSTALL_BIN = '0'
-    UV_PYTHON_INSTALL_REGISTRY = '0'
-    UV_PYTHON_NO_REGISTRY = '1'
-    UV_PYTHON_PREFERENCE = 'only-managed'
-    UV_LINK_MODE = 'hardlink'
-}
-foreach ($name in $pythonStorage.Keys) {
-    [Environment]::SetEnvironmentVariable($name, $pythonStorage[$name], 'Process')
-}
-Add-PortablePath 'Path' @("$PortableData\lib\uv", "$PortableData\bin")
-if ($env:VIRTUAL_ENV -and [System.IO.Directory]::Exists("$env:VIRTUAL_ENV\Scripts")) {
-    Add-PortablePath 'Path' @("$env:VIRTUAL_ENV\Scripts")
-}
+if (-not [System.IO.File]::Exists($UnifiedCacheFile)) {
+    [void][System.IO.Directory]::CreateDirectory($CacheDir)
+    [void][System.IO.Directory]::CreateDirectory($OmpCacheDir)
 
-function Get-PortableInitScript ([string]$CachePath, [scriptblock]$GetCacheKey, [scriptblock]$Generate) {
-    $header = "# CodeNix init: $(& $GetCacheKey)"
-    if ([System.IO.File]::Exists($CachePath)) {
-        try {
-            $cachedScript = [System.IO.File]::ReadAllText($CachePath)
-            if ($cachedScript.StartsWith($header + [Environment]::NewLine, [StringComparison]::Ordinal)) {
-                return [scriptblock]::Create($cachedScript)
+    $UnixModDir = "$Modules\modern-unix-win"
+    $UnixBin    = $null
+    $modernUnixVersion = $null
+    if ([System.IO.Directory]::Exists($UnixModDir)) {
+        $versions = foreach ($directory in [System.IO.Directory]::GetDirectories($UnixModDir)) {
+            $version = $null
+            if ([version]::TryParse([System.IO.Path]::GetFileName($directory), [ref]$version) -and
+                [System.IO.Directory]::Exists("$directory\bin")) {
+                $version
             }
-        } catch {
-            Write-Warning "Ignoring invalid initialization cache: $CachePath"
+        }
+        $modernUnixVersion = $versions | Sort-Object -Descending | Select-Object -First 1
+        if ($modernUnixVersion) {
+            $UnixBin = "$UnixModDir\$modernUnixVersion\bin"
         }
     }
 
-    $scriptText = (& $Generate) -join [Environment]::NewLine
-    if ([string]::IsNullOrWhiteSpace($scriptText)) {
-        throw "No initialization script was generated for $CachePath"
+    $sb = [System.Text.StringBuilder]::new(16384)
+    [void]$sb.AppendLine("`$UnixBin = '$UnixBin'")
+    [void]$sb.AppendLine("`$modernUnixVersion = '$modernUnixVersion'")
+    [void]$sb.AppendLine("Add-PortablePath 'Path' @(`$Bin, `$UnixBin)")
+    [void]$sb.AppendLine("Add-PortablePath 'PSModulePath' @(`$Modules)")
+
+    # Pre-resolve modern-unix-win aliases
+    $portableAliases = @{
+        cat = 'bat'; dig = 'dog'; grep = 'rg'; find = 'fd'; ps = 'procs'
+        top = 'btm'; du = 'dust'; df = 'duf'; ping = 'gping'; http = 'xh'; sed = 'sd'
     }
-    $header = "# CodeNix init: $(& $GetCacheKey)"
-    $scriptText = $header + [Environment]::NewLine + $scriptText
-    $initScript = [scriptblock]::Create($scriptText)
-    $tempPath = "$CachePath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
-    try {
-        [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($CachePath))
-        [System.IO.File]::WriteAllText($tempPath, $scriptText, [System.Text.UTF8Encoding]::new($false))
-        [System.IO.File]::Move($tempPath, $CachePath, $true)
-    } catch {
-        Write-Warning "Initialization cache could not be saved: $($_.Exception.Message)"
-    } finally {
-        if ([System.IO.File]::Exists($tempPath)) { [System.IO.File]::Delete($tempPath) }
-    }
-    return $initScript
-}
-
-function Get-PortableFileStamp ([string]$Path) {
-    $file = [System.IO.FileInfo]::new($Path)
-    return "$Path|$($file.Length)|$($file.LastWriteTimeUtc.Ticks)|$($PSVersionTable.PSVersion)"
-}
-
-$OmpTheme            = "$PortableData\lib\pwsh\ohmyposh\themes\tos-therm.omp.json"
-$OhMyPoshExe         = "$Bin\oh-my-posh.exe"
-$OmpCacheDir         = "$PortableData\cache\oh-my-posh"
-$env:POSH_CACHE_PATH = $OmpCacheDir
-$OmpInitCache        = "$CacheDir\omp-init-v4.ps1"
-
-if ([System.IO.File]::Exists($OhMyPoshExe) -and [System.IO.File]::Exists($OmpTheme)) {
-    try {
-        Remove-Item Env:\POSH_SESSION_ID -ErrorAction SilentlyContinue
-        [void][System.IO.Directory]::CreateDirectory($OmpCacheDir)
-        $ompInitScript = Get-PortableInitScript $OmpInitCache {
-            "$(Get-PortableFileStamp $OhMyPoshExe)|$(Get-PortableFileStamp $OmpTheme)|$OmpCacheDir"
-        } {
-            $themeBytes = [System.IO.File]::ReadAllBytes($OmpTheme)
-            if ($themeBytes.Length -ge 3 -and $themeBytes[0] -eq 0xEF -and $themeBytes[1] -eq 0xBB -and $themeBytes[2] -eq 0xBF) {
-                $themeTempPath = "$OmpTheme.$PID.$([guid]::NewGuid().ToString('N')).tmp"
-                try {
-                    [System.IO.File]::WriteAllText($themeTempPath,
-                        [System.Text.Encoding]::UTF8.GetString($themeBytes, 3, $themeBytes.Length - 3),
-                        [System.Text.UTF8Encoding]::new($false))
-                    [System.IO.File]::Move($themeTempPath, $OmpTheme, $true)
-                } finally {
-                    if ([System.IO.File]::Exists($themeTempPath)) { [System.IO.File]::Delete($themeTempPath) }
-                }
-            }
-            $output = & $OhMyPoshExe init pwsh --config $OmpTheme --print
-            if ($LASTEXITCODE -ne 0) { throw "Oh My Posh exited with code $LASTEXITCODE" }
-            $output
+    foreach ($entry in $portableAliases.GetEnumerator()) {
+        $exeName = "$($entry.Value).exe"
+        $targetPath = if ($UnixBin -and [System.IO.File]::Exists("$UnixBin\$exeName")) { "$UnixBin\$exeName" }
+                      elseif ([System.IO.File]::Exists("$Bin\$exeName")) { "$Bin\$exeName" }
+                      else { $null }
+        if ($targetPath) {
+            [void]$sb.AppendLine("Set-Alias -Name '$($entry.Key)' -Value '$targetPath' -Force")
         }
-        . $ompInitScript
-        $env:POSH_SESSION_ID = [guid]::NewGuid().ToString()
-    } catch {
-        Write-Warning "Oh My Posh initialization failed: $($_.Exception.Message)"
     }
-}
 
-# Cached zoxide Initialization
-$zoxideInitCache = "$CacheDir\zoxide-init-v2.ps1"
-$zoxideCommand = Get-Command zoxide -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($zoxideCommand) {
-    try {
-        $zoxideInitScript = Get-PortableInitScript $zoxideInitCache {
-            "$(Get-PortableFileStamp $zoxideCommand.Source)|$PortableData"
-        } {
-            $output = & $zoxideCommand.Source init powershell
-            if ($LASTEXITCODE -ne 0) { throw "zoxide exited with code $LASTEXITCODE" }
-            $output
+    # Pre-generate Oh My Posh init script
+    $OmpTheme    = "$PortableData\lib\pwsh\ohmyposh\themes\tos-therm.omp.json"
+    $OhMyPoshExe = "$Bin\oh-my-posh.exe"
+    if ([System.IO.File]::Exists($OhMyPoshExe) -and [System.IO.File]::Exists($OmpTheme)) {
+        $themeBytes = [System.IO.File]::ReadAllBytes($OmpTheme)
+        if ($themeBytes.Length -ge 3 -and $themeBytes[0] -eq 0xEF -and $themeBytes[1] -eq 0xBB -and $themeBytes[2] -eq 0xBF) {
+            [System.IO.File]::WriteAllText($OmpTheme,
+                [System.Text.Encoding]::UTF8.GetString($themeBytes, 3, $themeBytes.Length - 3),
+                [System.Text.UTF8Encoding]::new($false))
         }
-        . $zoxideInitScript
-    } catch {
-        Write-Warning "zoxide initialization failed: $($_.Exception.Message)"
+        $ompOut = (& $OhMyPoshExe init pwsh --config $OmpTheme --print) -join [Environment]::NewLine
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($ompOut)) {
+            [void]$sb.AppendLine('Remove-Item Env:\POSH_SESSION_ID -ErrorAction SilentlyContinue')
+            [void]$sb.AppendLine($ompOut)
+            [void]$sb.AppendLine('$env:POSH_SESSION_ID = [guid]::NewGuid().ToString()')
+        }
     }
+
+    # Pre-generate Zoxide init script
+    $zoxideExe = if ($UnixBin -and [System.IO.File]::Exists("$UnixBin\zoxide.exe")) { "$UnixBin\zoxide.exe" }
+                 elseif ([System.IO.File]::Exists("$Bin\zoxide.exe")) { "$Bin\zoxide.exe" }
+                 else { $null }
+    if ($zoxideExe) {
+        $zoxideOut = (& $zoxideExe init powershell) -join [Environment]::NewLine
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($zoxideOut)) {
+            [void]$sb.AppendLine($zoxideOut)
+        }
+    }
+
+    $tempPath = "$UnifiedCacheFile.$PID.tmp"
+    [System.IO.File]::WriteAllText($tempPath, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::Move($tempPath, $UnifiedCacheFile, $true)
 }
 
+$HistoryPath = "$PortableData\user-data\PowerShell\History.txt"
+$historyDir  = [System.IO.Path]::GetDirectoryName($HistoryPath)
+if (-not [System.IO.Directory]::Exists($historyDir)) {
+    [void][System.IO.Directory]::CreateDirectory($historyDir)
+}
+
+try {
+    if (-not (Get-Module PSReadLine)) {
+        Import-Module PSReadLine -ErrorAction Stop
+    }
+    
+    $predSource = if ($Host.UI.SupportsVirtualTerminal -and -not [Console]::IsOutputRedirected) { 'History' } else { 'None' }
+
+    Set-PSReadLineOption -EditMode Emacs `
+                         -PredictionSource $predSource `
+                         -PredictionViewStyle InlineView `
+                         -HistoryNoDuplicates `
+                         -HistorySearchCursorMovesToEnd `
+                         -HistorySaveStyle SaveIncrementally `
+                         -HistorySavePath $HistoryPath
+
+    Set-PSReadLineKeyHandler -Key 'Ctrl+t'  -ScriptBlock { Invoke-LazyPsFzf 'Ctrl+t' }
+    Set-PSReadLineKeyHandler -Key 'Ctrl+r'  -BriefDescription CodeNixHistorySearch -ScriptBlock { Invoke-LazyPsFzf 'Ctrl+r' }
+    Set-PSReadLineKeyHandler -Key Tab       -Function MenuComplete
+    Set-PSReadLineKeyHandler -Key Shift+Tab -Function TabCompletePrevious
+    Set-PSReadLineKeyHandler -Key UpArrow   -Function HistorySearchBackward
+    Set-PSReadLineKeyHandler -Key DownArrow -Function HistorySearchForward
+} catch {
+    Write-Warning "PSReadLine init error: $($_.Exception.Message)"
+}
+
+. $UnifiedCacheFile
+
+# Oh My Posh Transient Prompt
+if (Get-Command -Name Enable-PoshTransientPrompt -CommandType Function -ErrorAction SilentlyContinue) {
+    Enable-PoshTransientPrompt
+}
+
+# Functions, Lazy PSFzf & Completions
 function Invoke-CodeNixLsd {
     $directories = @(foreach ($argument in $args) {
         if ($argument -isnot [string] -or $argument.StartsWith('-')) { continue }
@@ -188,43 +179,10 @@ function Invoke-CodeNixLsd {
     & lsd @options @args
 }
 
-if (Get-Command lsd -CommandType Application -ErrorAction SilentlyContinue) {
-    Remove-Item Alias:ls -ErrorAction SilentlyContinue
-    function ls { Invoke-CodeNixLsd @args }
-    function ll { Invoke-CodeNixLsd -l @args }
-    function la { Invoke-CodeNixLsd -la @args }
-}
-
-$env:BAT_THEME = 'ansi'
-$portableAliases = @{
-    cat = 'bat'; dig = 'dog'; grep = 'rg'; find = 'fd'; ps = 'procs'
-    top = 'btm'; du = 'dust'; df = 'duf'; ping = 'gping'; http = 'xh'; sed = 'sd'
-}
-foreach ($aliasName in $portableAliases.Keys) {
-    $application = Get-Command $portableAliases[$aliasName] -CommandType Application -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($application) { Set-Alias -Name $aliasName -Value $application.Source -Force }
-}
-
-# Configure PSReadLine
-$HistoryPath = "$PortableData\user-data\PowerShell\History.txt"
-$HistoryDir  = [System.IO.Path]::GetDirectoryName($HistoryPath)
-$PSReadLineReady = $false
-try {
-    Import-Module PSReadLine -ErrorAction Stop
-    [void][System.IO.Directory]::CreateDirectory($HistoryDir)
-
-    Set-PSReadLineOption -EditMode Emacs `
-                     -PredictionSource HistoryAndPlugin `
-                     -PredictionViewStyle InlineView `
-                     -HistoryNoDuplicates `
-                     -HistorySearchCursorMovesToEnd `
-                     -HistorySaveStyle SaveIncrementally `
-                     -HistorySavePath $HistoryPath -ErrorAction Stop
-    $PSReadLineReady = $true
-} catch {
-    Write-Warning "PSReadLine configuration failed: $($_.Exception.Message)"
-}
+Remove-Item Alias:ls -ErrorAction SilentlyContinue
+function ls { Invoke-CodeNixLsd @args }
+function ll { Invoke-CodeNixLsd -l @args }
+function la { Invoke-CodeNixLsd -la @args }
 
 $script:CodeNixPSFzfModule = $null
 function Get-CodeNixHistory ([object[]]$Items = [Microsoft.PowerShell.PSConsoleReadLine]::GetHistoryItems()) {
@@ -364,36 +322,11 @@ $pathCompleter = {
     param($CommandName, $ParameterName, $WordToComplete, $CommandAst, $FakeBoundParameters)
     Get-CodeNixPathCompletion $WordToComplete -DirectoriesOnly:($CommandName -in @('cd', 'chdir', 'sl', 'pushd', 'Set-Location', 'Push-Location'))
 }
-foreach ($parameterName in @('Path', 'LiteralPath')) {
-    Register-ArgumentCompleter -CommandName Set-Location, Push-Location, Get-ChildItem, Get-Item, Get-Content, Set-Content, Add-Content, Remove-Item, Copy-Item, Move-Item `
-        -ParameterName $parameterName -ScriptBlock $pathCompleter
-}
+Register-ArgumentCompleter -CommandName Set-Location, Push-Location, Get-ChildItem, Get-Item, Get-Content, Set-Content, Add-Content, Remove-Item, Copy-Item, Move-Item `
+    -ParameterName Path -ScriptBlock $pathCompleter
+Register-ArgumentCompleter -CommandName Set-Location, Push-Location, Get-ChildItem, Get-Item, Get-Content, Set-Content, Add-Content, Remove-Item, Copy-Item, Move-Item `
+    -ParameterName LiteralPath -ScriptBlock $pathCompleter
 
-if ($PSReadLineReady) {
-    Set-PSReadLineKeyHandler -Key 'Ctrl+t' -ScriptBlock { Invoke-LazyPsFzf 'Ctrl+t' }
-    Set-PSReadLineKeyHandler -Key 'Ctrl+r' -BriefDescription CodeNixHistorySearch -ScriptBlock { Invoke-LazyPsFzf 'Ctrl+r' }
-
-    Set-PSReadLineKeyHandler -Key Ctrl+a -Function BeginningOfLine
-    Set-PSReadLineKeyHandler -Key Ctrl+e -Function EndOfLine
-    Set-PSReadLineKeyHandler -Key Alt+b  -Function BackwardWord
-    Set-PSReadLineKeyHandler -Key Alt+f  -Function ForwardWord
-    Set-PSReadLineKeyHandler -Key Ctrl+u -Function BackwardKillLine
-    Set-PSReadLineKeyHandler -Key Ctrl+k -Function KillLine
-    Set-PSReadLineKeyHandler -Key Tab    -Function MenuComplete
-    Set-PSReadLineKeyHandler -Key Shift+Tab -Function TabCompletePrevious
-    Set-PSReadLineKeyHandler -Key UpArrow -Function HistorySearchBackward
-    Set-PSReadLineKeyHandler -Key DownArrow -Function HistorySearchForward
-    Set-PSReadLineKeyHandler -Key Ctrl+b -Function BackwardChar
-    Set-PSReadLineKeyHandler -Key Ctrl+f -Function ForwardChar
-    Set-PSReadLineKeyHandler -Key Ctrl+w -Function UnixWordRubout
-    Set-PSReadLineKeyHandler -Key Alt+Backspace -Function BackwardKillWord
-    Set-PSReadLineKeyHandler -Key Alt+d -Function KillWord
-    Set-PSReadLineKeyHandler -Key Ctrl+y -Function Yank
-    Set-PSReadLineKeyHandler -Key Ctrl+l -Function ClearScreen
-    Set-PSReadLineKeyHandler -Key Ctrl+_ -Function Undo
-}
-
-# Helper Functions & .py Runner
 function which ($command) {
     Get-Command -Name $command -ErrorAction SilentlyContinue | ForEach-Object {
         if ($_ -is [System.Management.Automation.AliasInfo]) { $_ = $_.ResolvedCommand }
@@ -413,71 +346,45 @@ function ..   { Set-Location .. }
 function ...  { Set-Location ../.. }
 function .... { Set-Location ../../.. }
 
-function Repair-CodeNixPythonEnvironment ([string]$EnvironmentPath) {
-    $configuration = Join-Path $EnvironmentPath 'pyvenv.cfg'
-    if (-not [System.IO.File]::Exists($configuration)) { throw "Not a Python virtual environment: $EnvironmentPath" }
-    $values = @{}
-    foreach ($line in [System.IO.File]::ReadAllLines($configuration)) {
-        $separator = $line.IndexOf('=')
-        if ($separator -gt 0) { $values[$line.Substring(0, $separator).Trim()] = $line.Substring($separator + 1).Trim() }
+function Get-CodeNixPythonEnvironment {
+    $isActivated = -not [string]::IsNullOrWhiteSpace($env:VIRTUAL_ENV)
+    $environment = if ($isActivated) { $env:VIRTUAL_ENV } else { Join-Path $PortableData 'venvs\global' }
+    if (-not [System.IO.Directory]::Exists($environment) -or
+        -not [System.IO.File]::Exists((Join-Path $environment 'pyvenv.cfg'))) {
+        if ($isActivated) { throw "Not a Python virtual environment: $environment" }
+        throw "The CodeNix global Python environment is unavailable: $environment"
     }
-    $store = [System.IO.Path]::GetFullPath($env:UV_PYTHON_INSTALL_DIR).TrimEnd('\') + '\'
-    if ($values.home -and $values.home.Replace('/', '\').Contains('\data\lib\python\') -and
-        -not [System.IO.Path]::GetFullPath($values.home).StartsWith($store, [StringComparison]::OrdinalIgnoreCase) -and
-        $values.version_info -match '^3\.\d+\.\d+$') {
-        $runtime = Join-Path $store "cpython-$($values.version_info)-windows-x86_64-none\python.exe"
-        $uv = "$PortableData\lib\uv\uv.exe"
-        if ([System.IO.File]::Exists($runtime) -and [System.IO.File]::Exists($uv)) {
-            & $uv venv --python $values.version_info --relocatable --allow-existing --no-python-downloads --no-config --no-project $EnvironmentPath | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "Could not rebase virtual environment: $EnvironmentPath" }
-        }
-    }
-}
 
-function Get-CodeNixPythonEnvironment ([string]$FilePath) {
-    if ($env:VIRTUAL_ENV) {
-        $environmentPath = [System.IO.Path]::GetFullPath($env:VIRTUAL_ENV)
-    } else {
-        $directory = [System.IO.DirectoryInfo]::new([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($FilePath)))
-        $environmentPath = $null
-        while ($directory) {
-            $candidate = Join-Path $directory.FullName '.venv'
-            if ([System.IO.File]::Exists((Join-Path $candidate 'pyvenv.cfg'))) {
-                $environmentPath = $candidate
-                break
-            }
-            if ([System.IO.File]::Exists((Join-Path $directory.FullName 'pyproject.toml'))) { break }
-            $directory = $directory.Parent
-        }
+    $pythonPath = Join-Path $environment 'Scripts\python.exe'
+    if (-not [System.IO.File]::Exists($pythonPath)) {
+        if ($isActivated) { throw "The active virtual environment is unavailable: $environment" }
+        throw "The CodeNix global Python interpreter is unavailable: $pythonPath"
     }
-    if (-not $environmentPath) { throw 'No project virtual environment. Create or activate one with uv before running Python.' }
-    Repair-CodeNixPythonEnvironment $environmentPath
-    $python = Join-Path $environmentPath 'Scripts\python.exe'
-    if (-not [System.IO.File]::Exists($python)) { throw "The project virtual environment is unavailable: $environmentPath" }
-    return $environmentPath
+    $environment
 }
 
 function Get-PyRunner ([string]$FilePath) {
-    $environmentPath = Get-CodeNixPythonEnvironment $FilePath
-    $reader = $null
-    try {
-        $reader = [System.IO.File]::OpenText($FilePath)
-        $firstLine = $reader.ReadLine()
-        if ($null -ne $firstLine -and $firstLine -match '^#!\s*(?:\S*[\\/])?(?:env\s+(?:-S\s+)?)?replx(?:\.exe)?(?:\s|$)') {
-            $replx = Join-Path $environmentPath 'Scripts\replx.exe'
-            if (-not [System.IO.File]::Exists($replx)) { throw 'replx is not installed in the project virtual environment.' }
-            return $replx
+    $environment = Get-CodeNixPythonEnvironment
+    $reader = [System.IO.File]::OpenText($FilePath)
+    try { $firstLine = $reader.ReadLine() }
+    finally { $reader.Dispose() }
+
+    if ($null -ne $firstLine -and
+        $firstLine -match '^#!\s*(?:\S*[\\/])?(?:env\s+(?:-S\s+)?)?replx(?:\.exe)?(?:\s|$)') {
+        $runner = Join-Path $environment 'Scripts\replx.exe'
+        if (-not [System.IO.File]::Exists($runner)) {
+            throw "replx is not installed in the selected Python environment: $runner"
         }
-    } finally {
-        if ($null -ne $reader) { $reader.Dispose() }
+        return $runner
     }
-    return (Join-Path $environmentPath 'Scripts\python.exe')
+    Join-Path $environment 'Scripts\python.exe'
 }
 
 function Invoke-CodeNixPythonScript {
     param([string]$FilePath)
-    $runner = Get-PyRunner $FilePath
-    & $runner $FilePath @args
+    $fullPath = [System.IO.Path]::GetFullPath($FilePath)
+    $runner = Get-PyRunner $fullPath
+    & $runner $fullPath @args
 }
 
 if (-not (Get-Variable -Name CodeNixCommandNotFoundAction -Scope Script -ErrorAction SilentlyContinue)) {
@@ -502,109 +409,143 @@ if (-not (Get-Variable -Name CodeNixCommandNotFoundAction -Scope Script -ErrorAc
 }
 $ExecutionContext.InvokeCommand.CommandNotFoundAction = $script:CodeNixCommandNotFoundAction
 
-function ConvertTo-PyCommandLine ([string]$Line) {
-    $tokens = $null
-    $parseErrors = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Line, [ref]$tokens, [ref]$parseErrors)
-    $start = $Line.Length - $Line.TrimStart().Length
-    $fileExpression = $ast.Find({
-        param($node)
-        $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
-            $node.Extent.StartOffset -eq $start
-    }, $true)
-    if (-not $fileExpression -or -not $fileExpression.Value.EndsWith('.py', [StringComparison]::OrdinalIgnoreCase)) {
-        return $Line
-    }
-    try {
-        $targetFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($fileExpression.Value)
-        if (-not [System.IO.File]::Exists($targetFile)) { return $Line }
-    } catch { return $Line }
-    $replacement = "& 'Invoke-CodeNixPythonScript' '$($targetFile.Replace("'", "''"))'"
-    return $Line.Substring(0, $start) + $replacement + $Line.Substring($fileExpression.Extent.EndOffset)
-}
-
-$script:CodeNixAcceptLine = { [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine() }
-$ompModule = (Get-Command Set-TransientPrompt -CommandType Function -ErrorAction SilentlyContinue |
-    Select-Object -First 1).Module
-if ($ompModule -and $ompInitScript -is [scriptblock]) {
-    $enterFactory = $ompInitScript.Ast.Find({
-        param($node)
-        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq 'New-EnterKeyHandler'
-    }, $true)
-    if ($enterFactory) {
-        $ompAcceptLine = & $ompModule {
-            param([scriptblock]$Factory)
-            . $Factory
-            New-EnterKeyHandler { [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine() } $script:Streaming
-        } ([scriptblock]::Create($enterFactory.Extent.Text))
-        if ($ompAcceptLine -is [scriptblock]) { $script:CodeNixAcceptLine = $ompAcceptLine }
+function global:python {
+    $targetScript = $args | Where-Object { $_ -is [string] -and $_ -like '*.py' -and [System.IO.File]::Exists($_) } | Select-Object -First 1
+    if ($targetScript) {
+        $remainingArgs = @($args | Where-Object { $_ -ne $targetScript })
+        Invoke-CodeNixPythonScript $targetScript @remainingArgs
+    } else {
+        $runner = Join-Path (Get-CodeNixPythonEnvironment) 'Scripts\python.exe'
+        & $runner @args
     }
 }
 
-if ($PSReadLineReady) {
-    function global:PSConsoleHostReadLine {
-        [System.Diagnostics.DebuggerHidden()]
-        param()
+function global:py {
+    python @args
+}
 
-        $lastRunStatus = $?
-        Microsoft.PowerShell.Core\Set-StrictMode -Off
-        $line = [Microsoft.PowerShell.PSConsoleReadLine]::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus)
-        if ($null -ne $line) { ConvertTo-PyCommandLine $line }
+Remove-Alias -Name rm, rmdir, cp, mv, mkdir, touch, ? -Force -ErrorAction SilentlyContinue
+
+function Get-UnixStyleArgs {
+    param([array]$Arguments)
+    $flags = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $targets = [System.Collections.Generic.List[string]]::new()
+    foreach ($arg in $Arguments) {
+        if ($arg -is [string] -and $arg -match '^-[rfRF]+$') {
+            foreach ($char in $arg.TrimStart('-').GetEnumerator()) { $flags.Add([string]$char) }
+        } else {
+            $targets.Add($arg)
+        }
     }
+    return [pscustomobject]@{ Flags = $flags; Targets = $targets }
+}
 
-    Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
-        & $script:CodeNixAcceptLine
+function rm {
+    $parsed = Get-UnixStyleArgs $args
+    if ($parsed.Targets.Count -eq 0) { return }
+    $params = @{ Path = $parsed.Targets }
+    if ($parsed.Flags.Contains('r') -or $parsed.Flags.Contains('R')) { $params['Recurse'] = $true }
+    if ($parsed.Flags.Contains('f')) {
+        $params['Force'] = $true
+        $params['ErrorAction'] = 'SilentlyContinue'
+    }
+    Remove-Item @params
+}
+
+function rmdir {
+    rm @args
+}
+
+function cp {
+    $parsed = Get-UnixStyleArgs $args
+    if ($parsed.Targets.Count -lt 2) { return }
+    $params = @{
+        Path        = $parsed.Targets[0..($parsed.Targets.Count - 2)]
+        Destination = $parsed.Targets[-1]
+    }
+    if ($parsed.Flags.Contains('r') -or $parsed.Flags.Contains('R')) { $params['Recurse'] = $true }
+    if ($parsed.Flags.Contains('f')) { $params['Force'] = $true }
+    Copy-Item @params
+}
+
+function mv {
+    $parsed = Get-UnixStyleArgs $args
+    if ($parsed.Targets.Count -lt 2) { return }
+    $params = @{
+        Path        = $parsed.Targets[0..($parsed.Targets.Count - 2)]
+        Destination = $parsed.Targets[-1]
+    }
+    if ($parsed.Flags.Contains('f')) { $params['Force'] = $true }
+    Move-Item @params
+}
+
+function mkdir {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
+        [string[]]$Paths
+    )
+    foreach ($path in $Paths) {
+        New-Item -ItemType Directory -Force -Path $path | Out-Null
     }
 }
 
-# Help command '??'
-function global:?? {
+function touch {
+    $parsed = Get-UnixStyleArgs $args
+    if ($parsed.Targets.Count -eq 0) { return }
+    
+    foreach ($path in $parsed.Targets) {
+        if (Test-Path -LiteralPath $path) {
+            (Get-Item -LiteralPath $path).LastWriteTime = Get-Date
+        } else {
+            New-Item -ItemType File -Force -Path $path | Out-Null
+        }
+    }
+}
+
+function global:? {
     if (-not $UnixBin -or -not [System.IO.Directory]::Exists($UnixBin)) {
         Write-Host 'modern-unix-win binaries are not installed.' -ForegroundColor Red
         return
     }
-    $modernUnixBin = $UnixBin
-    if ([System.IO.Directory]::Exists($modernUnixBin)) {
-        $descriptions = @{
-            "bat"       = @{ desc = "A cat(1) clone with syntax highlighting and Git integration"; alias = "cat" }
-            "broot"     = @{ desc = "A tree explorer and a customizable launcher"; alias = $null }
-            "btm"       = @{ desc = "A customizable cross-platform graphical process/system monitor"; alias = "top" }
-            "cheat"     = @{ desc = "Create and view interactive cheatsheets on the command-line"; alias = $null }
-            "curlie"    = @{ desc = "The power of curl with the ease of use of httpie (curl frontend)"; alias = $null }
-            "delta"     = @{ desc = "A viewer for git and diff output"; alias = $null }
-            "dog"       = @{ desc = "Command-line DNS client"; alias = "dig" }
-            "duf"       = @{ desc = "Disk Usage/Free Utility - a better df alternative"; alias = "df" }
-            "dust"      = @{ desc = "A more intuitive version of du in rust"; alias = "du" }
-            "fd"        = @{ desc = "A simple, fast and user-friendly alternative to find"; alias = "find" }
-            "fzf"       = @{ desc = "A command-line fuzzy finder"; alias = $null }
-            "gping"     = @{ desc = "Ping, but with a graph"; alias = "ping" }
-            "hyperfine" = @{ desc = "A command-line benchmarking tool"; alias = $null }
-            "jq"        = @{ desc = "Command-line JSON processor"; alias = $null }
-            "lsd"       = @{ desc = "An ls command with a lot of pretty colors and some other stuff"; alias = "ls, ll, la" }
-            "procs"     = @{ desc = "A modern replacement for ps"; alias = "ps" }
-            "rg"        = @{ desc = "Recursively searches the current directory for a regex pattern"; alias = "grep" }
-            "sd"        = @{ desc = "Intuitive find & replace CLI (sed alternative)"; alias = "sed" }
-            "xh"        = @{ desc = "A friendly and fast tool for sending HTTP requests"; alias = "http" }
-            "zoxide"    = @{ desc = "A smarter cd command for your terminal"; alias = "z" }
-        }
-
-        Write-Host "`nModern Unix Commands (modern-unix-win v$modernUnixVersion):" -ForegroundColor Cyan
-        Write-Host ("=" * 80) -ForegroundColor DarkGray
-
-        Get-ChildItem -LiteralPath $modernUnixBin -File -Filter '*.exe' | Sort-Object Name | ForEach-Object {
-            $name = $_.BaseName
-            $info = $descriptions[$name]
-            if ($info) {
-                Write-Host ("  " + $name.PadRight(12)) -ForegroundColor Green -NoNewline
-                if ($info.alias) {
-                    Write-Host ("[" + $info.alias + "]").PadRight(14) -ForegroundColor Yellow -NoNewline
-                } else {
-                    Write-Host (" " * 14) -NoNewline
-                }
-                Write-Host $info.desc -ForegroundColor Gray
-            }
-        }
-        Write-Host ""
+    $descriptions = @{
+        "bat"       = @{ desc = "A cat(1) clone with syntax highlighting and Git integration"; alias = "cat" }
+        "broot"     = @{ desc = "A tree explorer and a customizable launcher"; alias = $null }
+        "btm"       = @{ desc = "A customizable cross-platform graphical process/system monitor"; alias = "top" }
+        "cheat"     = @{ desc = "Create and view interactive cheatsheets on the command-line"; alias = $null }
+        "curlie"    = @{ desc = "The power of curl with the ease of use of httpie (curl frontend)"; alias = $null }
+        "delta"     = @{ desc = "A viewer for git and diff output"; alias = $null }
+        "dog"       = @{ desc = "Command-line DNS client"; alias = "dig" }
+        "duf"       = @{ desc = "Disk Usage/Free Utility - a better df alternative"; alias = "df" }
+        "dust"      = @{ desc = "A more intuitive version of du in rust"; alias = "du" }
+        "fd"        = @{ desc = "A simple, fast and user-friendly alternative to find"; alias = "find" }
+        "fzf"       = @{ desc = "A command-line fuzzy finder"; alias = $null }
+        "gping"     = @{ desc = "Ping, but with a graph"; alias = "ping" }
+        "hyperfine" = @{ desc = "A command-line benchmarking tool"; alias = $null }
+        "jq"        = @{ desc = "Command-line JSON processor"; alias = $null }
+        "lsd"       = @{ desc = "An ls command with a lot of pretty colors and some other stuff"; alias = "ls, ll, la" }
+        "procs"     = @{ desc = "A modern replacement for ps"; alias = "ps" }
+        "rg"        = @{ desc = "Recursively searches the current directory for a regex pattern"; alias = "grep" }
+        "sd"        = @{ desc = "Intuitive find & replace CLI (sed alternative)"; alias = "sed" }
+        "xh"        = @{ desc = "A friendly and fast tool for sending HTTP requests"; alias = "http" }
+        "zoxide"    = @{ desc = "A smarter cd command for your terminal"; alias = "z" }
     }
+
+    Write-Host "`nModern Unix Commands (modern-unix-win v$modernUnixVersion):" -ForegroundColor Cyan
+    Write-Host ("=" * 80) -ForegroundColor DarkGray
+
+    Get-ChildItem -LiteralPath $UnixBin -File -Filter '*.exe' | Sort-Object Name | ForEach-Object {
+        $name = $_.BaseName
+        $info = $descriptions[$name]
+        if ($info) {
+            Write-Host ("  " + $name.PadRight(12)) -ForegroundColor Green -NoNewline
+            if ($info.alias) {
+                Write-Host ("[" + $info.alias + "]").PadRight(14) -ForegroundColor Yellow -NoNewline
+            } else {
+                Write-Host (" " * 14) -NoNewline
+            }
+            Write-Host $info.desc -ForegroundColor Gray
+        }
+    }
+    Write-Host ""
 }

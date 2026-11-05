@@ -21,19 +21,22 @@
     "**/.venv/**": true
   },
   "editor.mouseWheelZoom": true,
-  "editor.fontFamily": "'0xProto Nerd Font', 'DalseoHealing', monospace",
+  "editor.fontFamily": "'0xProto Nerd Font', 'DalseoHealing'",
   "editor.minimap.enabled": false,
   "editor.renderWhitespace": "boundary",
   "editor.cursorSmoothCaretAnimation": "on",
   "editor.smoothScrolling": true,
+  "editor.fontLigatures": true,
+  "editor.lineHeight": 1.5,
 
-  "workbench.colorTheme": "One Dark Pro Darker",
-  "workbench.iconTheme": "ayu",
   "workbench.startupEditor": "none",
   "workbench.tree.indent": 22,
-
+  "workbench.colorTheme": "Ayu Mirage Bordered",
+  "workbench.iconTheme": "ayu",
+  
   "window.commandCenter": false,
-
+  "security.workspace.trust.startupPrompt": "once",
+  
   "terminal.integrated.mouseWheelZoom": true,
   "terminal.integrated.fontSize": 14,
   "terminal.explorerKind": "integrated",

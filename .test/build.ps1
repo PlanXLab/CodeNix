@@ -27,7 +27,7 @@ foreach ($component in @('Launcher', 'Installer')) {
 & $compiler @arguments "/out:$launcher" $common @launcherSources
 if ($LASTEXITCODE -ne 0) { throw 'Launcher build failed.' }
 $resources = @("/resource:$launcher,launcher.exe")
-foreach ($fileName in @('Microsoft.PowerShell_profile.ps1', 'settings.json', '0xProtoNerdFont-Regular.ttf', 'DalseoHealingMedium.ttf', 'tos-therm.omp.json')) {
+foreach ($fileName in @('Microsoft.PowerShell_profile.ps1', 'pip.ps1', 'settings.json', '0xProtoNerdFont-Regular.ttf', 'DalseoHealingMedium.ttf', 'tos-therm.omp.json')) {
     $file = Join-Path $root "res\$fileName"
     if (-not (Test-Path -LiteralPath $file)) { throw "Required build resource is missing: $file" }
     $resources += "/resource:$file,$fileName"
