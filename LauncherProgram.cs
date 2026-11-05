@@ -120,6 +120,34 @@ namespace VSCodePortableLauncher
             CommonHelper.RecoverDirectoryReplacement(
                 Path.Combine(dataLibDir, "uv"),
                 Path.Combine(dataLibDir, ".uv-backup"));
+
+            string modulesDir = Path.Combine(dataLibDir, "pwsh", "Modules");
+            if (Directory.Exists(modulesDir))
+            {
+                foreach (string moduleName in new[] { "PSFzf", "modern-unix-win" })
+                {
+                    string backupPrefix = "." + moduleName + ".backup-";
+                    foreach (string backupDir in Directory.GetDirectories(modulesDir, backupPrefix + "*", SearchOption.TopDirectoryOnly))
+                    {
+                        string backupName = Path.GetFileName(backupDir);
+                        string version = backupName.Substring(backupPrefix.Length);
+                        if (string.IsNullOrWhiteSpace(version) || version.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                            continue;
+
+                        string targetDir = Path.Combine(modulesDir, moduleName, version);
+                        try
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(targetDir));
+                            CommonHelper.RecoverDirectoryReplacement(targetDir, backupDir);
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine("Could not recover " + moduleName + " update: " + ex.Message);
+                        }
+                    }
+                }
+            }
+
             VSCodeInstaller.RecoverInterruptedPortableUpdate(pvsDir);
         }
 
@@ -799,6 +827,11 @@ namespace VSCodePortableLauncher
 
             string[] candidateParts = candidateVersion.Split('-');
             string[] currentParts = currentVersion.Split('-');
+            if (!Regex.IsMatch(candidateParts[0], @"^\d+(?:\.\d+)*$"))
+                throw new InvalidDataException("The update source returned an invalid version: " + candidate);
+            if (!Regex.IsMatch(currentParts[0], @"^\d+(?:\.\d+)*$"))
+                return true;
+
             int numericComparison = CompareNumericVersionParts(candidateParts[0], currentParts[0]);
             if (numericComparison != 0)
                 return numericComparison > 0;

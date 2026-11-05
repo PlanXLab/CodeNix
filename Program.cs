@@ -10,7 +10,7 @@ namespace VSCodePortableInstaller
         {
             try
             {
-                // Default: Full installation
+                // Default: Full installation 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new InstallForm());

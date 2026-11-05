@@ -57,6 +57,35 @@ namespace VSCodePortableCommon
             return Version.TryParse(normalized, out parsed);
         }
 
+        public static async Task ValidatePythonVersionRequestAsync(string requestedVersion,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (!IsValidPythonVersionRequest(requestedVersion))
+                throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
+            if (string.IsNullOrWhiteSpace(requestedVersion))
+                return;
+
+            string validationDirectory = Path.Combine(Path.GetTempPath(),
+                "CodeNix-python-validation-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                await InstallUvAsync(validationDirectory, null, cancellationToken).ConfigureAwait(false);
+                string downloads = await RunAsync(validationDirectory,
+                    "python list --only-downloads --output-format json --no-config cpython@3",
+                    cancellationToken).ConfigureAwait(false);
+                SelectPythonVersion(downloads, requestedVersion.Trim());
+            }
+            finally
+            {
+                try
+                {
+                    if (Directory.Exists(validationDirectory)) Directory.Delete(validationDirectory, true);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
         public static string SelectLatestStablePython(string json)
         {
             return SelectPythonVersion(json, null);
@@ -1025,8 +1054,15 @@ namespace VSCodePortableCommon
             this.logActivity = logActivity ?? (_ => { });
         }
 
-        public async Task<KeyValuePair<string, string>> InstallAsync(string tempBaseDir, bool preserveExisting = false)
+        public Task<KeyValuePair<string, string>> InstallAsync(string tempBaseDir, bool preserveExisting = false)
         {
+            return InstallAsync(tempBaseDir, preserveExisting, default(System.Threading.CancellationToken));
+        }
+
+        public async Task<KeyValuePair<string, string>> InstallAsync(string tempBaseDir, bool preserveExisting,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             string componentName = "PowerShell 7";
             string version = "";
             string stagingDir = null;
@@ -1052,7 +1088,7 @@ namespace VSCodePortableCommon
                         using (var request = new HttpRequestMessage(HttpMethod.Head, "https://github.com/PowerShell/PowerShell/releases/latest"))
                         {
                             request.Headers.Add("User-Agent", "VSCode-Portable-Installer");
-                            using (var response = await client.SendAsync(request))
+                            using (var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false))
                             {
                                 response.EnsureSuccessStatusCode();
                                 string redirectUrl = response.RequestMessage.RequestUri.ToString();
@@ -1070,6 +1106,10 @@ namespace VSCodePortableCommon
                         {
                             throw new InvalidDataException("PowerShell release URL was not resolved.");
                         }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -1104,7 +1144,11 @@ namespace VSCodePortableCommon
 
                     try
                     {
-                        await DownloadFileAsync(client, url, zipPath, componentName, 10, 40);
+                        await DownloadFileAsync(client, url, zipPath, componentName, 10, 40, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -1130,7 +1174,7 @@ namespace VSCodePortableCommon
 
                     updateStatus(componentName, "Extracting...", 45);
                     Directory.CreateDirectory(stagingDir);
-                    await ExtractZipAsync(zipPath, stagingDir, componentName, 45, 80);
+                    await ExtractZipAsync(zipPath, stagingDir, componentName, 45, 80, cancellationToken).ConfigureAwait(false);
 
                     string stagedPwshExe = Path.Combine(stagingDir, "pwsh.exe");
                     if (!File.Exists(stagedPwshExe) || new FileInfo(stagedPwshExe).Length == 0)
@@ -1166,6 +1210,7 @@ namespace VSCodePortableCommon
                             Directory.Delete(localeDir, true);
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     updateStatus(componentName, "Installing...", 90);
                     CommonHelper.ReplaceDirectoryAtomically(
                         stagingDir,
@@ -1190,6 +1235,17 @@ namespace VSCodePortableCommon
                     updateStatus(componentName, preserveExisting ? "✓ Completed" : "Core installed", preserveExisting ? 100 : 60);
                 }
             }
+            catch (OperationCanceledException)
+            {
+                version = "";
+                if (!string.IsNullOrEmpty(stagingDir) && Directory.Exists(stagingDir))
+                {
+                    try { Directory.Delete(stagingDir, true); }
+                    catch (IOException cleanupError) { logActivity("PowerShell 7: Staging cleanup warning - " + cleanupError.Message); }
+                    catch (UnauthorizedAccessException cleanupError) { logActivity("PowerShell 7: Staging cleanup warning - " + cleanupError.Message); }
+                }
+                throw;
+            }
             catch (Exception ex)
             {
                 version = "";
@@ -1208,14 +1264,15 @@ namespace VSCodePortableCommon
                 : new KeyValuePair<string, string>("PWSH7_VERSION", version);
         }
 
-        private async Task DownloadFileAsync(HttpClient client, string url, string destPath, string componentName, int startProgress, int endProgress)
+        private async Task DownloadFileAsync(HttpClient client, string url, string destPath, string componentName,
+            int startProgress, int endProgress, System.Threading.CancellationToken cancellationToken)
         {
             int lastProgress = startProgress;
             await CommonHelper.DownloadFileWithRetryAsync(
                 client,
                 url,
                 destPath,
-                default(System.Threading.CancellationToken),
+                cancellationToken,
                 (downloaded, total) =>
                 {
                     if (total <= 0)
@@ -1229,7 +1286,8 @@ namespace VSCodePortableCommon
                 });
         }
 
-        private async Task ExtractZipAsync(string zipPath, string extractPath, string componentName, int startProgress, int endProgress)
+        private async Task ExtractZipAsync(string zipPath, string extractPath, string componentName,
+            int startProgress, int endProgress, System.Threading.CancellationToken cancellationToken)
         {
             await CommonHelper.ExtractZipWithProgressAsync(
                 zipPath,
@@ -1239,7 +1297,7 @@ namespace VSCodePortableCommon
                 endProgress,
                 progress => updateStatus(componentName, "Extracting...", progress),
                 message => logActivity(message),
-                default(System.Threading.CancellationToken));
+                cancellationToken);
         }
     }
 
@@ -1259,8 +1317,15 @@ namespace VSCodePortableCommon
             this.logActivity = logActivity ?? (_ => { });
         }
 
-        public async Task<KeyValuePair<string, string>> InstallAsync(string tempBaseDir)
+        public Task<KeyValuePair<string, string>> InstallAsync(string tempBaseDir)
         {
+            return InstallAsync(tempBaseDir, default(System.Threading.CancellationToken));
+        }
+
+        public async Task<KeyValuePair<string, string>> InstallAsync(string tempBaseDir,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             string componentName = "Oh My Posh";
             string version = "";
             string tempDir = null;
@@ -1284,7 +1349,7 @@ namespace VSCodePortableCommon
                         using (var request = new HttpRequestMessage(HttpMethod.Head, "https://github.com/JanDeDobbeleer/oh-my-posh/releases/latest"))
                         {
                             request.Headers.Add("User-Agent", "VSCode-Portable-Installer");
-                            using (var response = await client.SendAsync(request))
+                            using (var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false))
                             {
                                 response.EnsureSuccessStatusCode();
                                 string redirectUrl = response.RequestMessage.RequestUri.ToString();
@@ -1297,6 +1362,10 @@ namespace VSCodePortableCommon
                                 logActivity("Oh My Posh: Found latest version " + version + " (via redirect)");
                             }
                         }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
@@ -1330,7 +1399,7 @@ namespace VSCodePortableCommon
                     client.Timeout = TimeSpan.FromMinutes(20);
                     client.DefaultRequestHeaders.UserAgent.ParseAdd("CodeNix/1.0");
                     client.DefaultRequestHeaders.ConnectionClose = false; // Keep-Alive
-                    await CommonHelper.DownloadFileWithRetryAsync(client, downloadUrl, msixPath, default(System.Threading.CancellationToken));
+                    await CommonHelper.DownloadFileWithRetryAsync(client, downloadUrl, msixPath, cancellationToken).ConfigureAwait(false);
                 }
 
                 if (!File.Exists(msixPath) || new FileInfo(msixPath).Length == 0)
@@ -1339,9 +1408,11 @@ namespace VSCodePortableCommon
                 logActivity("Oh My Posh: Download completed");
                 updateStatus(componentName, "Extracting...", 55);
                 logActivity("Oh My Posh: Extracting...");
+                cancellationToken.ThrowIfCancellationRequested();
 
                 string extractDir = Path.Combine(tempDir, "ohmyposh_extract");
                 ZipFile.ExtractToDirectory(msixPath, extractDir);
+                cancellationToken.ThrowIfCancellationRequested();
 
                 updateStatus(componentName, "Installing...", 75);
 
@@ -1353,6 +1424,7 @@ namespace VSCodePortableCommon
                     Directory.CreateDirectory(pwshBin);
 
                     logActivity("Oh My Posh: Replacing executable...");
+                    cancellationToken.ThrowIfCancellationRequested();
 
                     string targetExe = Path.Combine(pwshBin, "oh-my-posh.exe");
                     stagedExePath = targetExe + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -1403,6 +1475,8 @@ namespace VSCodePortableCommon
                     catch (IOException cleanupError) { logActivity("Oh My Posh: Temporary cleanup warning - " + cleanupError.Message); }
                     catch (UnauthorizedAccessException cleanupError) { logActivity("Oh My Posh: Temporary cleanup warning - " + cleanupError.Message); }
                 }
+                if (ex is OperationCanceledException)
+                    throw;
             }
 
             return string.IsNullOrEmpty(version)
@@ -1427,8 +1501,16 @@ namespace VSCodePortableCommon
             this.logActivity = logActivity ?? (_ => { });
         }
 
-        public async Task<KeyValuePair<string, string>> InstallModuleAsync(string moduleName, string versionKey, int maxWaitSeconds = 30)
+        public Task<KeyValuePair<string, string>> InstallModuleAsync(string moduleName, string versionKey, int maxWaitSeconds = 30)
         {
+            return InstallModuleAsync(moduleName, versionKey, maxWaitSeconds,
+                default(System.Threading.CancellationToken));
+        }
+
+        public async Task<KeyValuePair<string, string>> InstallModuleAsync(string moduleName, string versionKey,
+            int maxWaitSeconds, System.Threading.CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             string version = "";
             string modulesPath = Path.Combine(baseDir, "data", "lib", "pwsh", "Modules");
             string tempZip = Path.Combine(Path.GetTempPath(), moduleName + "_" + Guid.NewGuid().ToString().Substring(0, 8) + ".zip");
@@ -1454,10 +1536,14 @@ namespace VSCodePortableCommon
                             client,
                             downloadUrl,
                             tempZip,
-                            System.Threading.CancellationToken.None);
+                            cancellationToken).ConfigureAwait(false);
                     }
 
                     downloadSucceeded = true;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
                 }
                 catch (Exception dlEx)
                 {
@@ -1465,7 +1551,7 @@ namespace VSCodePortableCommon
                 }
 
                 if (!downloadSucceeded)
-                    return await InstallModuleLegacyAsync(moduleName, versionKey, maxWaitSeconds);
+                    return await InstallModuleLegacyAsync(moduleName, versionKey, maxWaitSeconds, cancellationToken).ConfigureAwait(false);
 
                 updateStatus(moduleName, "Extracting...", 50);
                 logActivity(moduleName + ": Extracting package...");
@@ -1482,10 +1568,13 @@ namespace VSCodePortableCommon
                         80,
                         progress => updateStatus(moduleName, "Extracting...", progress),
                         logActivity,
-                        System.Threading.CancellationToken.None
-                    );
+                        cancellationToken).ConfigureAwait(false);
 
                     extractSucceeded = true;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -1496,7 +1585,7 @@ namespace VSCodePortableCommon
                 {
                     try { if (Directory.Exists(extractPath)) Directory.Delete(extractPath, true); } catch { }
                     try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
-                    return await InstallModuleLegacyAsync(moduleName, versionKey, maxWaitSeconds);
+                    return await InstallModuleLegacyAsync(moduleName, versionKey, maxWaitSeconds, cancellationToken).ConfigureAwait(false);
                 }
 
                 // Parse nuspec or psd1 for version
@@ -1539,11 +1628,13 @@ namespace VSCodePortableCommon
                 Directory.CreateDirectory(moduleParentDir);
                 stagingModuleDir = Path.Combine(modulesPath, "." + moduleName + ".stage-" + Guid.NewGuid().ToString("N"));
                 string backupModuleDir = Path.Combine(modulesPath, "." + moduleName + ".backup-" + version);
+                cancellationToken.ThrowIfCancellationRequested();
                 CommonHelper.CopyDirectoryRecursive(extractPath, stagingModuleDir);
                 if (Directory.GetFiles(stagingModuleDir, "*.psd1", SearchOption.AllDirectories).Length == 0)
                     throw new InvalidDataException("The extracted " + moduleName + " package has no module manifest.");
 
-                await EnsureModernUnixCompatibilityAsync(moduleName, stagingModuleDir);
+                await EnsureModernUnixCompatibilityAsync(moduleName, stagingModuleDir, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
                 CommonHelper.ReplaceDirectoryAtomically(stagingModuleDir, finalModuleDir, backupModuleDir, logActivity);
                 try { Directory.Delete(extractPath, true); }
                 catch (IOException ex) { logActivity(moduleName + ": Temporary extraction cleanup warning - " + ex.Message); }
@@ -1566,12 +1657,22 @@ namespace VSCodePortableCommon
                 }
                 try { if (Directory.Exists(extractPath)) Directory.Delete(extractPath, true); } catch { }
                 try { if (File.Exists(tempZip)) File.Delete(tempZip); } catch { }
+                if (ex is OperationCanceledException)
+                    throw;
                 return new KeyValuePair<string, string>(versionKey, "");
             }
         }
 
-        public async Task<KeyValuePair<string, string>> InstallModuleLegacyAsync(string moduleName, string versionKey, int maxWaitSeconds = 30)
+        public Task<KeyValuePair<string, string>> InstallModuleLegacyAsync(string moduleName, string versionKey, int maxWaitSeconds = 30)
         {
+            return InstallModuleLegacyAsync(moduleName, versionKey, maxWaitSeconds,
+                default(System.Threading.CancellationToken));
+        }
+
+        public async Task<KeyValuePair<string, string>> InstallModuleLegacyAsync(string moduleName, string versionKey,
+            int maxWaitSeconds, System.Threading.CancellationToken cancellationToken)
+        {
+                cancellationToken.ThrowIfCancellationRequested();
                 string version = "";
 
                 try
@@ -1583,7 +1684,7 @@ namespace VSCodePortableCommon
                 int retries = 0;
                 while (!File.Exists(pwshExe) && retries < maxWaitSeconds * 2)
                 {
-                    await Task.Delay(500);
+                    await Task.Delay(500, cancellationToken).ConfigureAwait(false);
                     retries++;
                 }
 
@@ -1617,6 +1718,12 @@ namespace VSCodePortableCommon
                 };
 
                 using (var process = Process.Start(psi))
+                using (cancellationToken.Register(() =>
+                {
+                    try { if (!process.HasExited) process.Kill(); }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                }))
                 {
                     // Read output streams asynchronously to prevent deadlock
                     var outputTask = process.StandardOutput.ReadToEndAsync();
@@ -1628,7 +1735,8 @@ namespace VSCodePortableCommon
                         int progress = 55;
                         while (!process.HasExited && progress < 85)
                         {
-                            await Task.Delay(5000); // Update every 5 seconds to reduce log spam
+                            try { await Task.Delay(5000, cancellationToken).ConfigureAwait(false); }
+                            catch (OperationCanceledException) { return; }
                             progress += 3;
                             if (!process.HasExited)
                             {
@@ -1646,9 +1754,18 @@ namespace VSCodePortableCommon
                     logActivity(moduleName + ": Waiting for Save-Module to complete (5 min timeout)...");
 
                     // Use proper async wait with timeout
-                    var timeoutTask = Task.Delay(300000); // 5 min timeout
+                    var timeoutTask = Task.Delay(300000, cancellationToken); // 5 min timeout
                     var processTask = Task.Run(() => process.WaitForExit());
                     var completedTask = await Task.WhenAny(processTask, timeoutTask);
+
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        try { if (!process.HasExited) process.Kill(); }
+                        catch (InvalidOperationException) { }
+                        catch (System.ComponentModel.Win32Exception) { }
+                        await processTask.ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
 
                     if (completedTask == timeoutTask)
                     {
@@ -1690,7 +1807,7 @@ namespace VSCodePortableCommon
                 updateStatus(moduleName, "Verifying...", 90);
 
                 // Wait a moment for file system to sync
-                await Task.Delay(500);
+                await Task.Delay(500, cancellationToken).ConfigureAwait(false);
 
                 string moduleDir = Path.Combine(modulesPath, moduleName);
                 logActivity(moduleName + ": Checking module directory: " + moduleDir);
@@ -1707,7 +1824,7 @@ namespace VSCodePortableCommon
 
                     if (!string.IsNullOrEmpty(version))
                     {
-                        await EnsureModernUnixCompatibilityAsync(moduleName, Path.Combine(moduleDir, version));
+                        await EnsureModernUnixCompatibilityAsync(moduleName, Path.Combine(moduleDir, version), cancellationToken).ConfigureAwait(false);
                         updateStatus(moduleName, "✓ Completed", 100);
                         logActivity(moduleName + ": Successfully installed version " + version);
                     }
@@ -1726,6 +1843,8 @@ namespace VSCodePortableCommon
             catch (Exception ex)
             {
                 version = "";
+                if (ex is OperationCanceledException)
+                    throw;
                 updateStatus(moduleName, "⚠ Error: " + ex.Message, 0);
                 logActivity(moduleName + ": EXCEPTION - " + ex.Message);
                 logActivity(moduleName + ": Stack trace: " + ex.StackTrace);
@@ -1736,8 +1855,10 @@ namespace VSCodePortableCommon
                 : new KeyValuePair<string, string>(versionKey, version);
         }
 
-        private async Task EnsureModernUnixCompatibilityAsync(string moduleName, string moduleDirectory)
+        private async Task EnsureModernUnixCompatibilityAsync(string moduleName, string moduleDirectory,
+            System.Threading.CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!string.Equals(moduleName, "modern-unix-win", StringComparison.OrdinalIgnoreCase))
                 return;
 
@@ -1759,7 +1880,7 @@ namespace VSCodePortableCommon
                     client.Timeout = TimeSpan.FromMinutes(5);
                     client.DefaultRequestHeaders.UserAgent.ParseAdd("CodeNix/1.0");
                     await CommonHelper.DownloadFileWithRetryAsync(client, releaseUrl, archivePath,
-                        System.Threading.CancellationToken.None);
+                        cancellationToken).ConfigureAwait(false);
                 }
 
                 using (var algorithm = System.Security.Cryptography.SHA256.Create())
@@ -1782,6 +1903,7 @@ namespace VSCodePortableCommon
                 if (ReadLsdVersion(stagedExecutable) != new Version(1, 2, 0))
                     throw new InvalidDataException("The lsd executable version does not match the verified release.");
 
+                cancellationToken.ThrowIfCancellationRequested();
                 File.Copy(stagedExecutable, replacement);
                 File.Replace(replacement, executable, executable + ".legacy-backup");
                 logActivity(moduleName + ": Bundled lsd upgraded to 1.2.0; original executable preserved.");

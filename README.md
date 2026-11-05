@@ -40,7 +40,7 @@ Installer UI behavior:
 
 - Default installation path is `C:\VSCode`
 - Leave the Python version blank for the latest stable release, enter `x.y` for the latest patch, or enter `x.y.z` for an exact stable release
-- The resolved version replaces the request in the field during installation; unavailable versions can be corrected before retry
+- The resolved version replaces the request in the field during installation; unavailable stable releases are rejected before setup begins
 - The uv archive is verified against the release's SHA256 digest
 - The UI provides overall progress, per-component progress, and a filtered Key Events log
 
@@ -237,16 +237,16 @@ uv add replx
 uv run main.py
 ```
 
-Request another Python version in `uv init --python <version>` when needed. uv stores runtimes under `data\lib\python`, and the default selection is not fixed by CodeNix. In VS Code, use **Python: Select Interpreter** to select the project's `.venv\Scripts\python.exe`. The **Run Python File in Terminal** button uses that interpreter directly; CodeNix disables automatic terminal activation in both the Python Environments extension and the legacy Python extension, avoiding activation commands and their execution-policy setup before running a file. Interpreter selection does not activate the terminal's environment.
+Request another Python version in `uv init --python <version>` when needed. uv stores runtimes under `data\lib\python`, and the default selection is not fixed by CodeNix. In VS Code, use **Python: Select Interpreter** to select the project's `.venv\Scripts\python.exe`. The **Run Python File in Terminal** button uses that interpreter directly. Newly opened integrated terminals automatically activate the selected environment, so terminal `python` and `pip` use the same environment. Existing terminals retain their current environment until reopened.
 
-For terminal commands, either use `uv run` as above (no activation required), or activate the environment explicitly:
+Outside VS Code, `uv venv` creates but does not activate `.venv`; use `uv run` as above or activate it explicitly:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python main.py
 ```
 
-In an existing installation, set `"python-envs.terminal.autoActivationType": "off"` and `"python.terminal.activateEnvironment": false` in VS Code's user settings, and remove any workspace overrides that re-enable activation. Close existing terminals and open a new one for the settings to take effect. CodeNix does not change execution policy automatically for Python activation; if local policy blocks manual activation, use `uv run` instead. Project environments are not retargeted when runtimes change; the global pip environment remains tied to the runtime selected when it was created.
+In an existing installation, set `"python-envs.terminal.autoActivationType": "command"` and `"python.terminal.activateEnvironment": true` in VS Code's user settings, and remove any workspace overrides that disable activation. Close existing terminals and open a new one for the settings to take effect. CodeNix does not change execution policy automatically; if local policy blocks activation, use `uv run` instead. Project environments are not retargeted when runtimes change; the global pip environment remains tied to the runtime selected when it was created.
 
 For pip-style global installs in a CodeNix PowerShell terminal, use the bundled `pip.ps1` wrapper:
 

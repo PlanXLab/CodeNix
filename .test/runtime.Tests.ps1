@@ -6,6 +6,7 @@ $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ('CodeNix-renewal-' + [
 [void][System.IO.Directory]::CreateDirectory($temporary)
 $harness = @'
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -21,6 +22,15 @@ public static class RenewalTests
 
     public static int Main(string[] arguments)
     {
+        if (string.Equals(Path.GetFileName(Assembly.GetEntryAssembly().Location), "uv.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            string argumentsFile = Environment.GetEnvironmentVariable("CODENIX_TEST_UV_ARGUMENTS_FILE");
+            File.WriteAllLines(argumentsFile, arguments);
+            int uvExitCode;
+            return int.TryParse(Environment.GetEnvironmentVariable("CODENIX_TEST_UV_EXIT_CODE"), out uvExitCode)
+                ? uvExitCode : 0;
+        }
+
         try
         {
             string mode = arguments[0];
@@ -57,6 +67,75 @@ public static class RenewalTests
                 var validateExtension = launcherType.GetMethod("ValidateInstalledVSCodeExtension", BindingFlags.NonPublic | BindingFlags.Static);
                 Require((bool)validateExtension.Invoke(null, new object[] { debugger, "ms-python.debugpy" }), "Debugger must not require PET");
                 Require(!(bool)validateExtension.Invoke(null, new object[] { debugger, "ms-python.vscode-python-envs" }), "Environment extension must require PET");
+                var noOpStatus = new Action<string, string, int>(delegate { });
+                var cancelledTokenSource = new CancellationTokenSource();
+                cancelledTokenSource.Cancel();
+                bool powerShellCancellationPropagated = false;
+                try { new PowerShellInstaller(root, noOpStatus).InstallAsync(root, false, cancelledTokenSource.Token).GetAwaiter().GetResult(); }
+                catch (OperationCanceledException) { powerShellCancellationPropagated = true; }
+                Require(powerShellCancellationPropagated, "PowerShell installation must honor cancellation before network access");
+                bool ohMyPoshCancellationPropagated = false;
+                try { new OhMyPoshInstaller(root, noOpStatus).InstallAsync(root, cancelledTokenSource.Token).GetAwaiter().GetResult(); }
+                catch (OperationCanceledException) { ohMyPoshCancellationPropagated = true; }
+                Require(ohMyPoshCancellationPropagated, "Oh My Posh installation must honor cancellation before network access");
+                bool moduleCancellationPropagated = false;
+                try { new ModuleInstaller(root, noOpStatus).InstallModuleAsync("PSFzf", "PSFZF_VERSION", 30, cancelledTokenSource.Token).GetAwaiter().GetResult(); }
+                catch (OperationCanceledException) { moduleCancellationPropagated = true; }
+                Require(moduleCancellationPropagated, "Module installation must honor cancellation before network access");
+                cancelledTokenSource.Dispose();
+                var isVersionNewer = launcherType.GetMethod("IsVersionNewer", BindingFlags.NonPublic | BindingFlags.Static);
+                Require((bool)isVersionNewer.Invoke(null, new object[] { "1.106.0", "latest" }) &&
+                    (bool)isVersionNewer.Invoke(null, new object[] { "1.106.0", "installed" }),
+                    "Unknown installed versions must be treated as upgradeable");
+                Require(!(bool)isVersionNewer.Invoke(null, new object[] { "1.106.0", "1.106.0" }) &&
+                    !(bool)isVersionNewer.Invoke(null, new object[] { "1.106.0", "1.107.0" }),
+                    "Version checks must ignore equal and newer installed versions");
+                var installerType = typeof(VSCodePortableInstaller.InstallForm);
+                var needsVSCodeRetry = installerType.GetMethod("NeedsVSCodeRetry", BindingFlags.NonPublic | BindingFlags.Static);
+                var needsPythonRetry = installerType.GetMethod("NeedsPythonRetry", BindingFlags.NonPublic | BindingFlags.Static);
+                Require(needsVSCodeRetry != null && needsPythonRetry != null, "Retry health checks were not found");
+                string retryRoot = Path.Combine(root, "retry-health");
+                Directory.CreateDirectory(retryRoot);
+                Require((bool)needsVSCodeRetry.Invoke(null, new object[] { retryRoot }), "Missing Code.exe must trigger VS Code repair");
+                File.WriteAllText(Path.Combine(retryRoot, "Code.exe"), "");
+                Require(!(bool)needsVSCodeRetry.Invoke(null, new object[] { retryRoot }), "Existing Code.exe must not trigger VS Code repair");
+                var shutdownForUpgrade = typeof(VSCodePortableLauncher.UpgradeForm).GetMethod("RequiresVSCodeShutdownForUpgrade", BindingFlags.NonPublic | BindingFlags.Static);
+                Require((bool)shutdownForUpgrade.Invoke(null, new object[] { false, false, true, false }) &&
+                    !(bool)shutdownForUpgrade.Invoke(null, new object[] { false, false, false, false }),
+                    "Module-only upgrades must close a matching VS Code process");
+                var recoverPackageUpdates = launcherType.GetMethod("RecoverInterruptedPackageUpdates", BindingFlags.NonPublic | BindingFlags.Static);
+                string modulesDir = Path.Combine(retryRoot, "data", "lib", "pwsh", "Modules");
+                string psfzfBackup = Path.Combine(modulesDir, ".PSFzf.backup-2.0.0");
+                string unixBackup = Path.Combine(modulesDir, ".modern-unix-win.backup-1.0.0");
+                string unixTargetFile = Path.Combine(modulesDir, "modern-unix-win", "1.0.0", "current.txt");
+                Directory.CreateDirectory(psfzfBackup);
+                Directory.CreateDirectory(unixBackup);
+                Directory.CreateDirectory(Path.GetDirectoryName(unixTargetFile));
+                File.WriteAllText(Path.Combine(psfzfBackup, "PSFzf.psd1"), "restored");
+                File.WriteAllText(unixTargetFile, "current");
+                File.WriteAllText(Path.Combine(unixBackup, "stale.txt"), "stale");
+                recoverPackageUpdates.Invoke(null, new object[] { retryRoot });
+                Require(File.Exists(Path.Combine(modulesDir, "PSFzf", "2.0.0", "PSFzf.psd1")) &&
+                    !Directory.Exists(psfzfBackup), "Interrupted module replacement must restore the previous version");
+                Require(File.Exists(unixTargetFile) &&
+                    !Directory.Exists(unixBackup), "Committed module replacement must discard its stale backup");
+                var retryVersions = new Dictionary<string, string> { { "UV_VERSION", "0.13.7" }, { "PYTHON_VERSION", "3.15.2" } };
+                Require((bool)needsPythonRetry.Invoke(null, new object[] { retryRoot, retryVersions }), "Missing Python files must trigger repair");
+                string retryRuntime = Path.Combine(PortablePython.RuntimeDirectory(retryRoot), "cpython-3.15.2-windows-x86_64-none", "python.exe");
+                string retryGlobalEnvironment = PortablePython.GlobalEnvironmentDirectory(retryRoot);
+                Directory.CreateDirectory(Path.GetDirectoryName(PortablePython.UvPath(retryRoot)));
+                Directory.CreateDirectory(Path.GetDirectoryName(retryRuntime));
+                Directory.CreateDirectory(Path.Combine(retryGlobalEnvironment, "Scripts"));
+                File.WriteAllText(PortablePython.UvPath(retryRoot), "");
+                File.WriteAllText(retryRuntime, "");
+                File.WriteAllText(PortablePython.GlobalPythonExecutable(retryRoot), "");
+                File.WriteAllText(Path.Combine(retryGlobalEnvironment, "pyvenv.cfg"), "version_info = 3.15.2");
+                Require(!(bool)needsPythonRetry.Invoke(null, new object[] { retryRoot, retryVersions }), "Complete Python files must not trigger repair");
+                File.Delete(retryRuntime);
+                Require((bool)needsPythonRetry.Invoke(null, new object[] { retryRoot, retryVersions }), "A missing Python runtime must trigger repair");
+                File.WriteAllText(retryRuntime, "");
+                File.Delete(PortablePython.GlobalPythonExecutable(retryRoot));
+                Require((bool)needsPythonRetry.Invoke(null, new object[] { retryRoot, retryVersions }), "A missing global interpreter must trigger repair");
                 string downloads = "[{\"implementation\":\"cpython\",\"os\":\"windows\",\"arch\":\"x86_64\",\"variant\":\"default\",\"version\":\"3.99.0a1\"},{\"implementation\":\"cpython\",\"os\":\"windows\",\"arch\":\"x86_64\",\"variant\":\"default\",\"version\":\"3.14.3\"},{\"implementation\":\"cpython\",\"os\":\"windows\",\"arch\":\"x86_64\",\"variant\":\"default\",\"version\":\"3.14.9\"},{\"implementation\":\"cpython\",\"os\":\"windows\",\"arch\":\"x86_64\",\"variant\":\"default\",\"version\":\"3.15.1\"},{\"implementation\":\"cpython\",\"os\":\"windows\",\"arch\":\"x86_64\",\"variant\":\"default\",\"version\":\"3.15.2\"},{\"implementation\":\"cpython\",\"os\":\"linux\",\"arch\":\"x86_64\",\"variant\":\"default\",\"version\":\"3.98.0\"}]";
                 Require(PortablePython.SelectLatestStablePython(downloads) == "3.15.2", "Stable Windows selection");
                 Require(PortablePython.IsValidPythonVersionRequest("") &&
@@ -72,6 +151,10 @@ public static class RenewalTests
                 try { PortablePython.SelectPythonVersion(downloads, "3.15.3"); }
                 catch (InvalidOperationException) { unavailablePythonVersionRejected = true; }
                 Require(unavailablePythonVersionRejected, "Unavailable exact Python versions must be rejected");
+                bool unavailablePythonMinorRejected = false;
+                try { PortablePython.SelectPythonVersion(downloads, "3.17"); }
+                catch (InvalidOperationException) { unavailablePythonMinorRejected = true; }
+                Require(unavailablePythonMinorRejected, "A nonexistent Python minor version must be rejected");
                 var selector = typeof(VSCodePortableInstaller.InstallForm).GetMethod("FindLatestStableVersion", BindingFlags.NonPublic | BindingFlags.Static);
                 string marketplace = "{\"results\":[{\"extensions\":[{\"versions\":[{\"version\":\"9.0.0\",\"targetPlatform\":\"linux-x64\",\"properties\":[]},{\"version\":\"8.0.0\",\"targetPlatform\":\"win32-x64\",\"properties\":[{\"key\":\"Microsoft.VisualStudio.Code.PreRelease\",\"value\":\"true\"}]},{\"version\":\"7.0.0\",\"targetPlatform\":\"win32-x64\",\"properties\":[]}]}]}]}";
                 Require((string)selector.Invoke(null, new object[] { marketplace, true }) == "7.0.0", "Stable Windows VSIX selection");
@@ -81,6 +164,8 @@ public static class RenewalTests
                 Console.WriteLine(PortablePython.InstallUvAsync(root, arguments.Length > 2 ? arguments[2] : null, CancellationToken.None).GetAwaiter().GetResult());
             else if (mode == "python")
                 Console.WriteLine(PortablePython.InstallLatestPythonAsync(root, CancellationToken.None, null).GetAwaiter().GetResult());
+            else if (mode == "version-check")
+                PortablePython.ValidatePythonVersionRequestAsync(arguments[2], CancellationToken.None).GetAwaiter().GetResult();
             else if (mode == "global-venv")
                 Console.WriteLine(PortablePython.EnsureGlobalEnvironmentAsync(root, arguments[2], CancellationToken.None).GetAwaiter().GetResult());
             else if (mode == "uv")
@@ -154,8 +239,8 @@ try {
     Invoke-Check @('check', $original)
     $settings = Get-Content -LiteralPath (Join-Path $repository 'res\settings.json') -Raw | ConvertFrom-Json
     if ($settings.'python.defaultInterpreterPath' -cne '${workspaceFolder}/.venv') { throw 'Project interpreter default was not configured.' }
-    if ($settings.'python-envs.terminal.autoActivationType' -cne 'off') { throw 'Python Environments terminal auto-activation must be disabled.' }
-    if ($settings.'python.terminal.activateEnvironment' -isnot [bool] -or $settings.'python.terminal.activateEnvironment' -ne $false) { throw 'Legacy Python terminal auto-activation must be disabled.' }
+    if ($settings.'python-envs.terminal.autoActivationType' -cne 'command') { throw 'The selected Python environment must activate in new terminals.' }
+    if ($settings.'python.terminal.activateEnvironment' -isnot [bool] -or $settings.'python.terminal.activateEnvironment' -ne $true) { throw 'Legacy Python terminal activation must remain enabled for compatibility.' }
     $tokens = $null
     $parseErrors = $null
     $profileAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repository 'res\Microsoft.PowerShell_profile.ps1'), [ref]$tokens, [ref]$parseErrors)
@@ -219,12 +304,125 @@ try {
     }
     $tokens = $null
     $parseErrors = $null
-    [void][System.Management.Automation.Language.Parser]::ParseFile($pipScript, [ref]$tokens, [ref]$parseErrors)
+    $pipAst = [System.Management.Automation.Language.Parser]::ParseFile($pipScript, [ref]$tokens, [ref]$parseErrors)
     if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+    $argumentParser = $pipAst.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'ConvertTo-PipArgumentList'
+    }, $true)
+    if ($null -eq $argumentParser) { throw 'The pip argument parser was not found.' }
+    Invoke-Expression $argumentParser.Extent.Text
+    $parsedArguments = @(ConvertTo-PipArgumentList 'idna --requirements "requirements files/base.txt" --index-url https://pypi.org/simple')
+    if ($parsedArguments.Count -ne 5 -or $parsedArguments[0] -cne 'idna' -or
+        $parsedArguments[1] -cne '--requirements' -or $parsedArguments[2] -cne 'requirements files/base.txt' -or
+        $parsedArguments[3] -cne '--index-url' -or $parsedArguments[4] -cne 'https://pypi.org/simple') {
+        throw 'The pip argument parser did not preserve quoted values.'
+    }
+    $specifierArguments = @(ConvertTo-PipArgumentList 'idna>=1.2')
+    if ($specifierArguments.Count -ne 1 -or $specifierArguments[0] -cne 'idna>=1.2') {
+        throw 'The pip argument parser changed a package version specifier.'
+    }
+    if (@(ConvertTo-PipArgumentList '   ').Count -ne 0) { throw 'The pip argument parser did not ignore blank input.' }
+
+    $pipDataDirectory = Join-Path $temporary 'pip-wrapper-data'
+    $fakeUvDirectory = Join-Path $pipDataDirectory 'lib\uv'
+    $globalEnvironment = Join-Path $pipDataDirectory 'venvs\global'
+    $activeEnvironment = Join-Path $temporary 'active project environment'
+    [void][System.IO.Directory]::CreateDirectory($fakeUvDirectory)
+    [void][System.IO.Directory]::CreateDirectory((Join-Path $globalEnvironment 'Scripts'))
+    [void][System.IO.Directory]::CreateDirectory((Join-Path $activeEnvironment 'Scripts'))
+    Copy-Item -LiteralPath $runner -Destination (Join-Path $fakeUvDirectory 'uv.exe') -Force
+    [System.IO.File]::WriteAllText((Join-Path $globalEnvironment 'Scripts\python.exe'), '')
+    [System.IO.File]::WriteAllText((Join-Path $globalEnvironment 'pyvenv.cfg'), 'version_info = 3.15.2')
+    [System.IO.File]::WriteAllText((Join-Path $activeEnvironment 'Scripts\python.exe'), '')
+    [System.IO.File]::WriteAllText((Join-Path $activeEnvironment 'pyvenv.cfg'), 'version_info = 3.15.2')
+    $fakeUvArgumentsFile = Join-Path $temporary 'uv-arguments.txt'
+    $environmentNames = @('VSCODE_PORTABLE', 'VIRTUAL_ENV', 'CODENIX_TEST_UV_ARGUMENTS_FILE', 'CODENIX_TEST_UV_EXIT_CODE')
+    $previousEnvironment = @{}
+    foreach ($name in $environmentNames) {
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    $script:pipPromptResponse = 'idna --requirements "requirements files/base.txt"'
+    $previousReadHostFunction = Get-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+    $global:pipPromptResponse = 'idna --requirements "requirements files/base.txt"'
+    $global:capturedPipPrompt = $null
+    function global:Read-Host {
+        param([string]$Prompt)
+        $global:capturedPipPrompt = $Prompt
+        return $global:pipPromptResponse
+    }
+    try {
+        $env:VSCODE_PORTABLE = $pipDataDirectory
+        $env:VIRTUAL_ENV = $null
+        $env:CODENIX_TEST_UV_ARGUMENTS_FILE = $fakeUvArgumentsFile
+        $env:CODENIX_TEST_UV_EXIT_CODE = '0'
+        $promptedInstallOutput = @(& $pipScript install)
+        if ($LASTEXITCODE -ne 0 -or $global:capturedPipPrompt -notlike '*package*') {
+            $observedPrompt = if ($null -eq $global:capturedPipPrompt) { '<none>' } else { $global:capturedPipPrompt }
+            throw ("pip install prompt check failed (exit={0}, prompt='{1}', output='{2}')." -f
+                $LASTEXITCODE, $observedPrompt, ($promptedInstallOutput -join ' | '))
+        }
+        $forwardedArguments = Get-Content -LiteralPath $fakeUvArgumentsFile
+        if ($forwardedArguments.Count -ne 8 -or $forwardedArguments[0] -cne 'pip' -or
+            $forwardedArguments[1] -cne 'install' -or $forwardedArguments[5] -cne 'idna' -or
+            $forwardedArguments[6] -cne '--requirements' -or
+            $forwardedArguments[7] -cne 'requirements files/base.txt') {
+            throw 'pip install did not forward the prompted arguments to uv.'
+        }
+
+        $env:VIRTUAL_ENV = $activeEnvironment
+        & $pipScript list | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'pip list failed with an active workspace environment.' }
+        $activeArguments = Get-Content -LiteralPath $fakeUvArgumentsFile
+        if ($activeArguments.Count -ne 5 -or $activeArguments[3] -cne '--python' -or
+            $activeArguments[4] -cne (Join-Path $activeEnvironment 'Scripts\python.exe')) {
+            throw 'pip did not select the active workspace environment.'
+        }
+
+        $env:VIRTUAL_ENV = $null
+        & $pipScript list | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'pip list failed with the default global environment.' }
+        $globalArguments = Get-Content -LiteralPath $fakeUvArgumentsFile
+        if ($globalArguments.Count -ne 5 -or $globalArguments[3] -cne '--python' -or
+            $globalArguments[4] -cne (Join-Path $globalEnvironment 'Scripts\python.exe')) {
+            throw 'pip did not fall back to the global environment.'
+        }
+
+        $env:CODENIX_TEST_UV_EXIT_CODE = '2'
+        $wrapperException = $null
+        try { & $pipScript install idna | Out-Null } catch { $wrapperException = $_ }
+        if ($null -ne $wrapperException -or $LASTEXITCODE -ne 2) {
+            throw 'A nonzero uv exit code was converted into a PowerShell exception.'
+        }
+
+        $global:pipPromptResponse = ''
+        $cancelledInstall = @(& $pipScript install) -join ' '
+        if ($cancelledInstall -notmatch 'cancelled') { throw 'An empty pip install prompt was not cancelled cleanly.' }
+        Write-Output 'PASS: pip install prompting, argument forwarding, cancellation, and native exit codes'
+    } finally {
+        if ($null -ne $previousReadHostFunction) {
+            Set-Item Function:\global:Read-Host -Value $previousReadHostFunction.ScriptBlock
+        } else {
+            Remove-Item Function:\global:Read-Host -ErrorAction SilentlyContinue
+        }
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+        }
+        Remove-Variable pipPromptResponse, capturedPipPrompt -Scope Global -ErrorAction SilentlyContinue
+    }
     Write-Output 'PASS: pip.ps1 syntax'
     if ($Network) {
         $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
         $machinePath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
+        Invoke-Check @('version-check', $original, '3.15.2') | Out-Null
+        Write-Output 'PASS: uv-backed Python release preflight'
+        $unsupportedPythonVersion = & $runner @('version-check', $original, '3.17') 2>&1
+        $unsupportedPythonExitCode = $LASTEXITCODE
+        if ($unsupportedPythonExitCode -eq 0 -or ($unsupportedPythonVersion | Out-String) -notmatch '3.17') {
+            throw 'The uv-backed preflight did not reject nonexistent Python 3.17.'
+        }
+        Write-Output 'PASS: nonexistent Python version rejected before target installation'
         $uvVersion = (Invoke-Check @('install', $original) | Select-Object -Last 1).Trim()
         $pythonVersion = (Invoke-Check @('python', $original) | Select-Object -Last 1).Trim()
         Write-Output "PASS: installed uv $uvVersion and stable CPython $pythonVersion"
@@ -280,8 +478,16 @@ try {
 
             $resolvedPip = (Get-Command pip -ErrorAction Stop | Select-Object -First 1).Source
             if ($resolvedPip -cne $pipInstallPath) { throw 'The pip command did not resolve to the portable wrapper.' }
-            $resolvedPython = (Get-Command python -ErrorAction Stop | Select-Object -First 1).Source
+            $resolvedPython = (Get-Command python.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
             if ($resolvedPython -cne $globalPython) { throw 'The python command did not resolve to the global environment.' }
+
+            $env:VIRTUAL_ENV = $alpha
+            $workspacePackages = (& pip list | Out-String)
+            if ($LASTEXITCODE -ne 0 -or $workspacePackages -notmatch '(?im)^\s*markupsafe\s+') {
+                throw 'The pip wrapper did not use the explicitly activated workspace environment.'
+            }
+            Write-Output 'PASS: pip wrapper follows an explicitly activated workspace environment'
+            $env:VIRTUAL_ENV = $null
 
             & pip install idna pygments
             if ($LASTEXITCODE -ne 0) { throw 'Global pip install failed.' }
@@ -290,14 +496,14 @@ try {
             $globalPackages = (& pip list | Out-String)
             if ($LASTEXITCODE -ne 0 -or $globalPackages -notmatch '(?im)^\s*idna\s+' -or
                 $globalPackages -notmatch '(?im)^\s*pygments\s+') { throw 'Global pip list did not show installed packages.' }
-            & python -c "import idna, pygments; print(idna.encode('example.com').decode())" | Out-Null
+            & python.exe -c "import idna, pygments; print(idna.encode('example.com').decode())" | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'Global package imports failed from an unrelated working directory.' }
             $pygmentize = (Get-Command pygmentize -ErrorAction Stop | Select-Object -First 1).Source
             if ($pygmentize -cne (Join-Path $globalScripts 'pygmentize.exe')) { throw 'The global console script was not resolved from Scripts.' }
             & pip uninstall --offline -y idna pygments
             if ($LASTEXITCODE -ne 0) { throw 'Global pip uninstall failed.' }
             if (Test-Path -LiteralPath (Join-Path $globalScripts 'pygmentize.exe')) { throw 'Global pip uninstall left the console script behind.' }
-            $packagesRemoved = & python -c "import importlib.util; print(importlib.util.find_spec('idna') is None and importlib.util.find_spec('pygments') is None)"
+            $packagesRemoved = & python.exe -c "import importlib.util; print(importlib.util.find_spec('idna') is None and importlib.util.find_spec('pygments') is None)"
             if ($LASTEXITCODE -ne 0 -or ($packagesRemoved | Select-Object -Last 1).Trim() -cne 'True') {
                 throw 'Global pip uninstall left packages importable.'
             }

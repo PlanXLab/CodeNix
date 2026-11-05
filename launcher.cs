@@ -227,6 +227,12 @@ namespace VSCodePortableLauncher
             base.OnFormClosing(e);
         }
 
+        private static bool RequiresVSCodeShutdownForUpgrade(bool hasPwsh7Upgrade, bool hasPythonUpgrade,
+            bool hasModuleUpgrade, bool hasVSCodeUpgrade)
+        {
+            return hasPwsh7Upgrade || hasPythonUpgrade || hasModuleUpgrade || hasVSCodeUpgrade;
+        }
+
         private async Task PerformUpgrade(List<string> pendingUpgrades)
         {
             try
@@ -245,7 +251,7 @@ namespace VSCodePortableLauncher
                 bool hasModuleUpgrade = pendingUpgrades.Any(f => f == "upgrade_ohmyposh" || f == "upgrade_psfzf" || f == "upgrade_modern_unix");
                 bool hasVSCodeUpgrade = pendingUpgrades.Contains("upgrade_vscode");
 
-                if (hasPwsh7Upgrade || hasPythonUpgrade || hasOhMyPoshUpgrade || hasVSCodeUpgrade)
+                if (RequiresVSCodeShutdownForUpgrade(hasPwsh7Upgrade, hasPythonUpgrade, hasModuleUpgrade, hasVSCodeUpgrade))
                 {
                     LogActivity("Checking for running Code.exe processes...");
                     string codeExePath = Path.Combine(pvsDir, "Code.exe");

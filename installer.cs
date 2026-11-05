@@ -73,6 +73,8 @@ namespace VSCodePortableInstaller
         private System.Diagnostics.Stopwatch installTimer;
         private DateTime installStartTime;
         private System.Threading.CancellationTokenSource installCancellationSource;
+        private System.Threading.CancellationTokenSource pythonVersionValidationCancellationSource;
+        private Task installationTask;
         private System.Windows.Forms.Timer elapsedTimer;
         private StringBuilder logFileBuffer = new StringBuilder();
         private object logFileLock = new object();
@@ -114,6 +116,7 @@ namespace VSCodePortableInstaller
             this.AcceptButton = installButton;
             installPathTextBox.KeyDown += InputField_KeyDown;
             pythonVersionTextBox.KeyDown += InputField_KeyDown;
+            pythonVersionTextBox.TextChanged += PythonVersionTextBox_TextChanged;
             UpdateOverallProgress();
             UpdateCurrentTask("Ready to install");
 
@@ -242,12 +245,99 @@ namespace VSCodePortableInstaller
             if (PortablePython.IsValidPythonVersionRequest(requestedVersion))
                 return true;
 
-            MessageBox.Show(this,
-                "Enter a Python version as x.y or x.y.z (for example, 3.13 or 3.13.2). " +
-                "A single major version such as 3 is incomplete; leave it blank for the latest stable version.",
-                "Invalid Python Version",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            pythonHint.Text = "Invalid version; enter x.y or x.y.z.";
+            pythonHint.ForeColor = System.Drawing.Color.FromArgb(180, 55, 55);
+            pythonVersionTextBox.Focus();
+            pythonVersionTextBox.SelectAll();
+            return false;
+        }
+
+        private void PythonVersionTextBox_TextChanged(object sender, EventArgs e)
+        {
+            if (installStarted)
+                return;
+
+            pythonHint.Text = "Blank = latest; enter x.y or x.y.z";
+            pythonHint.ForeColor = System.Drawing.Color.FromArgb(150, 150, 150);
+        }
+
+        private async Task<bool> ValidatePythonVersionAvailabilityAsync(string requestedVersion)
+        {
+            if (string.IsNullOrWhiteSpace(requestedVersion))
+                return true;
+
+            string previousHintText = pythonHint.Text;
+            System.Drawing.Color previousHintColor = pythonHint.ForeColor;
+            bool buttonWasEnabled = installButton.Enabled;
+            bool versionBoxWasEnabled = pythonVersionTextBox.Enabled;
+            bool pathBoxWasEnabled = installPathTextBox.Enabled;
+            bool browseButtonWasEnabled = browseButton.Enabled;
+            bool validationSucceeded = false;
+            var validationCancellationSource = new System.Threading.CancellationTokenSource();
+            pythonVersionValidationCancellationSource = validationCancellationSource;
+            string errorMessage = null;
+            string errorTitle = "Python Version Check Failed";
+            MessageBoxIcon errorIcon = MessageBoxIcon.Error;
+
+            try
+            {
+                installButton.Enabled = false;
+                pythonHint.Text = "Checking version...";
+                pythonHint.ForeColor = System.Drawing.Color.FromArgb(80, 110, 135);
+                pythonVersionTextBox.Enabled = false;
+                installPathTextBox.Enabled = false;
+                browseButton.Enabled = false;
+                await PortablePython.ValidatePythonVersionRequestAsync(requestedVersion,
+                    validationCancellationSource.Token);
+                validationSucceeded = true;
+                return !IsDisposed;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+            catch (InvalidOperationException ex)
+            {
+                errorMessage = ex.Message;
+                errorTitle = "Unavailable Python Version";
+                errorIcon = MessageBoxIcon.Warning;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = "Could not verify Python release availability. Check your internet connection and try again.\n\n" + ex.Message;
+            }
+            finally
+            {
+                if (ReferenceEquals(pythonVersionValidationCancellationSource, validationCancellationSource))
+                    pythonVersionValidationCancellationSource = null;
+                validationCancellationSource.Dispose();
+                if (!IsDisposed)
+                {
+                    installButton.Enabled = buttonWasEnabled;
+                    pythonVersionTextBox.Enabled = versionBoxWasEnabled;
+                    installPathTextBox.Enabled = pathBoxWasEnabled;
+                    browseButton.Enabled = browseButtonWasEnabled;
+                    if (validationSucceeded)
+                    {
+                        pythonHint.Text = string.Empty;
+                        pythonHint.ForeColor = System.Drawing.Color.FromArgb(150, 150, 150);
+                    }
+                    else if (errorMessage == null)
+                    {
+                        pythonHint.Text = previousHintText;
+                        pythonHint.ForeColor = previousHintColor;
+                    }
+                }
+            }
+
+            if (IsDisposed)
+                return false;
+
+            pythonHint.Text = errorTitle == "Unavailable Python Version"
+                ? "Unavailable; enter another version."
+                : "Check failed; try again.";
+            pythonHint.ForeColor = System.Drawing.Color.FromArgb(180, 55, 55);
+            MessageBox.Show(this, errorMessage, errorTitle, MessageBoxButtons.OK, errorIcon);
             pythonVersionTextBox.Focus();
             pythonVersionTextBox.SelectAll();
             return false;
@@ -274,6 +364,8 @@ namespace VSCodePortableInstaller
             {
                 if (!ValidatePythonVersionInput())
                     return;
+                if (!await ValidatePythonVersionAvailabilityAsync(pythonVersionTextBox.Text.Trim()))
+                    return;
                 RetryInstallation();
                 return;
             }
@@ -296,6 +388,8 @@ namespace VSCodePortableInstaller
             if (!ValidateInstallPath(path))
                 return;
             string requestedPythonVersion = pythonVersionTextBox.Text.Trim();
+            if (!await ValidatePythonVersionAvailabilityAsync(requestedPythonVersion))
+                return;
 
             cancelButton.Enabled = true;
             installDir = path;
@@ -325,7 +419,8 @@ namespace VSCodePortableInstaller
 
             // Start installation
             var token = installCancellationSource.Token;
-            await Task.Run(() => PerformInstallation(token, requestedPythonVersion));
+            installationTask = Task.Run(() => PerformInstallation(token, requestedPythonVersion));
+            await installationTask;
         }
 
         private void CancelButton_Click(object sender, EventArgs e)
@@ -366,9 +461,10 @@ namespace VSCodePortableInstaller
 
                     // Hide main window
                     this.Hide();
+                    Task taskToStop = installationTask;
 
                     // Show progress dialog in a separate thread
-                    Task.Run(() =>
+                    Task.Run(async () =>
                     {
                         Form progressDialog = null;
                         Label progressLabel = null;
@@ -429,9 +525,13 @@ namespace VSCodePortableInstaller
                                 Application.DoEvents();
                             }));
 
-                            // Brief delay to allow tasks to respond to cancellation
-                            LogActivity("Waiting for tasks to cancel...");
-                            System.Threading.Thread.Sleep(500);
+                            LogActivity("Waiting for installation tasks to stop...");
+                            if (taskToStop != null)
+                            {
+                                try { await taskToStop.ConfigureAwait(false); }
+                                catch (OperationCanceledException) { }
+                                catch (Exception ex) { LogActivity("Installation task stopped with an error: " + ex.Message); }
+                            }
 
                             // Update progress
                             Invoke(new Action(() =>
@@ -820,6 +920,10 @@ namespace VSCodePortableInstaller
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            if (pythonVersionValidationCancellationSource != null &&
+                !pythonVersionValidationCancellationSource.IsCancellationRequested)
+                pythonVersionValidationCancellationSource.Cancel();
+
             // Prevent closing during installation (unless force exit is requested)
             if (installStarted && !installCompleted && e.CloseReason == CloseReason.UserClosing)
             {
@@ -869,12 +973,14 @@ namespace VSCodePortableInstaller
                 var phase1Results = await Task.WhenAll(
                     InstallFontsAsync(cancellationToken),
                     InstallPythonCoreAsync(cancellationToken, requestedPythonVersion));
+                cancellationToken.ThrowIfCancellationRequested();
 
                 // Phase 1B: Installing VSCode and PowerShell 7...
                 LogActivity("Phase 1B: Installing VSCode and PowerShell 7...");
                 var powerShellTask = InstallPowerShell7Async(cancellationToken);
                 var vscodeTask = InstallVSCodeFlowAsync(cancellationToken);
                 var phase1BResults = await Task.WhenAll(vscodeTask, powerShellTask);
+                cancellationToken.ThrowIfCancellationRequested();
 
                 // Collect all version info from staged parallel phases
                 var allVersions = new Dictionary<string, string>();
@@ -980,8 +1086,19 @@ namespace VSCodePortableInstaller
             {
                 LogActivity("Installation error: " + ex.Message);
                 SaveInstallLog();
-                ShowError("Installation error: " + ex.Message);
+                criticalFailed = true;
                 installCompleted = true;
+                if (installTimer != null)
+                    installTimer.Stop();
+                Invoke(new Action(() =>
+                {
+                    StopElapsedTimer();
+                    pythonVersionTextBox.Enabled = true;
+                    RestoreInstallButtonStyle("Retry");
+                    cancelButton.Enabled = true;
+                    MessageBox.Show(this, "Installation error: " + ex.Message, "Installation Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }));
             }
         }
 
@@ -1452,6 +1569,7 @@ namespace VSCodePortableInstaller
         {
             LogActivity("=== Retrying PowerShell 7 installation ===");
             pwsh7Failed = false;
+            installCompleted = false;
 
             // Create new cancellation token for retry
             installCancellationSource = new System.Threading.CancellationTokenSource();
@@ -1465,7 +1583,7 @@ namespace VSCodePortableInstaller
 
             // Retry PowerShell 7 installation
             vscodeDownloadCompleted = true;
-            Task.Run(async () =>
+            installationTask = Task.Run(async () =>
             {
                 try
                 {
@@ -1498,6 +1616,7 @@ namespace VSCodePortableInstaller
 
                     if (pwsh7Failed)
                     {
+                        installCompleted = true;
                         LogActivity("PowerShell 7: Retry failed");
                         Invoke(new Action(() =>
                         {
@@ -1506,6 +1625,7 @@ namespace VSCodePortableInstaller
                     }
                     else
                     {
+                        installCompleted = true;
                         LogActivity("PowerShell 7: Retry successful!");
                         UpdateCurrentTask("✓ All components installed successfully!");
                         Invoke(new Action(() =>
@@ -1517,12 +1637,38 @@ namespace VSCodePortableInstaller
                 catch (Exception ex)
                 {
                     LogActivity("PowerShell 7: Retry error - " + ex.Message);
+                    pwsh7Failed = true;
+                    installCompleted = true;
                     Invoke(new Action(() =>
                     {
                         RestoreInstallButtonStyle("Retry PowerShell 7");
                     }));
                 }
             });
+        }
+
+        private static bool NeedsVSCodeRetry(string installDirectory)
+        {
+            return !File.Exists(Path.Combine(installDirectory, "Code.exe"));
+        }
+
+        private static bool NeedsPythonRetry(string installDirectory, Dictionary<string, string> installedVersions)
+        {
+            string pythonVersion;
+            Version parsedVersion;
+            if (!installedVersions.ContainsKey("UV_VERSION") ||
+                !File.Exists(PortablePython.UvPath(installDirectory)) ||
+                !installedVersions.TryGetValue("PYTHON_VERSION", out pythonVersion) ||
+                !Version.TryParse(pythonVersion, out parsedVersion) || parsedVersion.Major != 3 ||
+                parsedVersion.Build < 0 || parsedVersion.Revision >= 0)
+                return true;
+
+            string runtime = Path.Combine(PortablePython.RuntimeDirectory(installDirectory),
+                "cpython-" + pythonVersion + "-windows-x86_64-none", "python.exe");
+            string globalEnvironment = PortablePython.GlobalEnvironmentDirectory(installDirectory);
+            return !File.Exists(runtime) ||
+                !File.Exists(PortablePython.GlobalPythonExecutable(installDirectory)) ||
+                !File.Exists(Path.Combine(globalEnvironment, "pyvenv.cfg"));
         }
 
         private void RetryInstallation()
@@ -1544,7 +1690,7 @@ namespace VSCodePortableInstaller
             }));
 
             // Only retry components that failed (not re-install successful ones)
-            Task.Run(async () =>
+            installationTask = Task.Run(async () =>
             {
                 try
                 {
@@ -1568,9 +1714,8 @@ namespace VSCodePortableInstaller
                     }
 
                     // Check which critical components need retry (check both codenix.info AND disk)
-                    bool needVSCode = !allVersions.ContainsKey("VSCODE_VERSION") && !File.Exists(Path.Combine(installDir, "Code.exe"));
-                    bool needPython = !allVersions.ContainsKey("PYTHON_VERSION") ||
-                        !allVersions.ContainsKey("UV_VERSION") || !File.Exists(PortablePython.UvPath(installDir));
+                    bool needVSCode = NeedsVSCodeRetry(installDir);
+                    bool needPython = NeedsPythonRetry(installDir, allVersions);
 
                     if (needVSCode)
                     {
@@ -1582,8 +1727,8 @@ namespace VSCodePortableInstaller
                     else if (!allVersions.ContainsKey("VSCODE_VERSION"))
                     {
                         // Code.exe exists on disk but version unknown - detect it
-                        allVersions["VSCODE_VERSION"] = "installed";
-                        LogActivity("VSCode: Already installed on disk, skipping re-download");
+                        allVersions["VSCODE_VERSION"] = DetectInstalledVSCodeVersion();
+                        LogActivity("VSCode: Already installed on disk at version " + allVersions["VSCODE_VERSION"] + ", skipping re-download");
                         UpdateComponentStatus("VSCode", "✓ Completed", 100);
                     }
 
@@ -1665,6 +1810,7 @@ namespace VSCodePortableInstaller
                     installCompleted = true;
                     Invoke(new Action(() =>
                     {
+                        pythonVersionTextBox.Enabled = true;
                         RestoreInstallButtonStyle("Retry");
                     }));
                 }
@@ -1831,6 +1977,7 @@ namespace VSCodePortableInstaller
             // STEP 1: Install PowerShell 7 core first (MUST complete before modules)
             LogActivity("PowerShell 7: Installing core...");
             var pwshResult = await InstallPowerShell7(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
 
             // Check if installation failed
             if (string.IsNullOrEmpty(pwshResult.Value))
@@ -1923,6 +2070,7 @@ namespace VSCodePortableInstaller
             int completedTasks = 0;
             int totalTasks = parallelTasks.Count;
             var runningTasks = new List<Task<KeyValuePair<string, string>>>(parallelTasks);
+            Exception firstTaskError = null;
 
             while (runningTasks.Count > 0)
             {
@@ -1933,12 +2081,30 @@ namespace VSCodePortableInstaller
                 int progress = 60 + (30 * completedTasks / totalTasks);
                 UpdateComponentStatus("PowerShell 7", "Installing modules... (" + completedTasks + "/" + totalTasks + ")", progress);
 
-                var result = await completed;
-                LogActivity("PowerShell 7: Received version info - " + result.Key + " = " + result.Value);
-                if (!string.IsNullOrEmpty(result.Value))
-                    versions[result.Key] = result.Value;
+                try
+                {
+                    var result = await completed;
+                    LogActivity("PowerShell 7: Received version info - " + result.Key + " = " + result.Value);
+                    if (!string.IsNullOrEmpty(result.Value))
+                        versions[result.Key] = result.Value;
+                }
+                catch (Exception ex)
+                {
+                    firstTaskError = ex;
+                    break;
+                }
             }
 
+            if (firstTaskError != null)
+            {
+                try { await Task.WhenAll(parallelTasks).ConfigureAwait(false); }
+                catch { }
+                if (cancellationToken.IsCancellationRequested)
+                    cancellationToken.ThrowIfCancellationRequested();
+                throw new InvalidOperationException("A PowerShell addon installation failed.", firstTaskError);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             LogActivity("PowerShell 7: All modules and Oh My Posh installed");
 
             // STEP 3: Install Oh My Posh theme after Oh My Posh is ready
@@ -2134,7 +2300,7 @@ namespace VSCodePortableInstaller
             }
 
             UpdateComponentStatus("VSCode", "Installing extensions...", 80);
-            await InstallVSCodeExtensions("VSCode");
+            await InstallVSCodeExtensions("VSCode", cancellationToken);
             UpdateComponentStatus("VSCode", "✓ Completed", 100);
             LogActivity("VSCode: Installation completed");
 
@@ -2157,7 +2323,11 @@ namespace VSCodePortableInstaller
                     {
                         LogActivity("Python: Selected stable CPython " + version);
                         if (!IsDisposed && IsHandleCreated)
-                           Invoke(new Action(() => pythonVersionTextBox.Text = version));
+                           Invoke(new Action(() =>
+                           {
+                               pythonVersionTextBox.Text = version;
+                               pythonHint.Text = string.Empty;
+                           }));
                     }, message => LogActivity("Python: " + message));
                 UpdateComponentStatus("Python", "Creating global pip environment...", 85);
                 string globalEnvironment = await PortablePython.EnsureGlobalEnvironmentAsync(installDir, pythonVersion,
@@ -2196,7 +2366,7 @@ namespace VSCodePortableInstaller
                 (message) => LogActivity(message)
             );
 
-            return await installer.InstallAsync(Path.Combine(Path.GetTempPath(), TEMP_INSTALL_DIR), false);
+            return await installer.InstallAsync(Path.Combine(Path.GetTempPath(), TEMP_INSTALL_DIR), false, cancellationToken);
         }
 
         private async Task<KeyValuePair<string, string>> InstallOhMyPosh(System.Threading.CancellationToken cancellationToken)
@@ -2207,7 +2377,7 @@ namespace VSCodePortableInstaller
                 (message) => LogActivity(message)
             );
 
-            return await installer.InstallAsync(Path.Combine(Path.GetTempPath(), TEMP_INSTALL_DIR));
+            return await installer.InstallAsync(Path.Combine(Path.GetTempPath(), TEMP_INSTALL_DIR), cancellationToken);
         }
 
         private string GetOhMyPoshVersion(string exePath)
@@ -2243,7 +2413,7 @@ namespace VSCodePortableInstaller
                 (message) => LogActivity(message)
             );
 
-            return await installer.InstallModuleAsync(moduleName, versionKey);
+            return await installer.InstallModuleAsync(moduleName, versionKey, 30, cancellationToken);
         }
 
         private async Task InstallOhMyPoshTheme()
@@ -2300,10 +2470,11 @@ namespace VSCodePortableInstaller
             catch { }
         }
 
-        private async Task InstallVSCodeExtensions(string componentName)
+        private async Task InstallVSCodeExtensions(string componentName, System.Threading.CancellationToken cancellationToken)
         {
             try
             {
+            cancellationToken.ThrowIfCancellationRequested();
                 LogActivity("VSCode: Installing extensions in batch with retry...");
 
                 string codeExe = Path.Combine(installDir, "Code.exe");
@@ -2350,7 +2521,7 @@ namespace VSCodePortableInstaller
                 };
 
                 // Brief wait for file system to settle after VSCode extraction
-                await Task.Delay(300);
+                await Task.Delay(300, cancellationToken);
 
                 int installed = 0;
                 int total = extensions.Count;
@@ -2365,13 +2536,14 @@ namespace VSCodePortableInstaller
 
                 UpdateComponentStatus(componentName, "Downloading extensions...", 82);
                 LogActivity("VSCode: Downloading latest VSIX packages in parallel for " + total + " extension(s)...");
-                var downloadedPackages = await DownloadVSCodeExtensionPackagesAsync(extensions, tempVsixDir, componentName);
+                var downloadedPackages = await DownloadVSCodeExtensionPackagesAsync(extensions, tempVsixDir, componentName, cancellationToken);
 
                 UpdateComponentStatus(componentName, "Installing extensions (local)...", 86);
                 LogActivity("VSCode: Installing extensions by direct VSIX extraction...");
 
                 foreach (var ext in extensions)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     bool success = false;
                     string localPackagePath;
                     if (downloadedPackages.TryGetValue(ext, out localPackagePath))
@@ -2395,7 +2567,7 @@ namespace VSCodePortableInstaller
                     if (cliAvailable)
                     {
                         LogActivity("VSCode: Retrying " + failedExtensions.Count + " missing extension(s) via CLI...");
-                        await Task.Delay(1500);
+                        await Task.Delay(1500, cancellationToken);
 
                         var stillFailed = new List<string>();
                         foreach (var ext in failedExtensions)
@@ -2411,7 +2583,7 @@ namespace VSCodePortableInstaller
                                     retryInput = ext;
 
                                 string retryArguments = BuildVSCodeExtensionInstallArguments(cliJs, extensionsDir, userDataDir, new[] { retryInput });
-                                var retryResult = await RunVSCodeCliProcess(codeExe, retryArguments, 600000);
+                                var retryResult = await RunVSCodeCliProcess(codeExe, retryArguments, 600000, cancellationToken);
                                 bool isInstalled = IsVSCodeExtensionInstalled(extensionsDir, ext);
 
                                 if (isInstalled || (retryResult.Item4 && retryResult.Item1 == 0))
@@ -2426,13 +2598,15 @@ namespace VSCodePortableInstaller
                             }
                             catch (Exception ex)
                             {
+                                if (cancellationToken.IsCancellationRequested)
+                                    throw new OperationCanceledException(cancellationToken);
                                 LogActivity("VSCode: Final retry exception for " + ext + " -- " + ex.Message);
                             }
 
                             if (!success)
                                 stillFailed.Add(ext);
 
-                            await Task.Delay(300);
+                            await Task.Delay(300, cancellationToken);
                         }
 
                         if (stillFailed.Count > 0)
@@ -2449,7 +2623,7 @@ namespace VSCodePortableInstaller
                     {
                         // CLI not available: re-download and retry direct extraction
                         LogActivity("VSCode: CLI unavailable -- re-downloading " + failedExtensions.Count + " failed extension(s) for retry...");
-                        await Task.Delay(2000);
+                        await Task.Delay(2000, cancellationToken);
 
                         var stillFailed = new List<string>();
                         foreach (var ext in failedExtensions)
@@ -2463,8 +2637,9 @@ namespace VSCodePortableInstaller
                                         AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
                                     };
                                     using (var retryClient = new HttpClient(retryHandler))
-                                    using (var retryCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(120)))
+                                    using (var retryCts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                                     {
+                                        retryCts.CancelAfter(TimeSpan.FromSeconds(120));
                                         retryClient.Timeout = TimeSpan.FromMinutes(MAX_DOWNLOAD_TIMEOUT_MINUTES);
                                         retryClient.DefaultRequestHeaders.Add("User-Agent", "VSCode-Portable-Installer");
                                         var retryToken = retryCts.Token;
@@ -2491,6 +2666,8 @@ namespace VSCodePortableInstaller
                             }
                             catch (OperationCanceledException)
                             {
+                                if (cancellationToken.IsCancellationRequested)
+                                    throw;
                                 LogActivity("VSCode: Re-download retry timeout (120s) for " + ext);
                             }
                             catch (Exception ex)
@@ -2501,7 +2678,7 @@ namespace VSCodePortableInstaller
                                 LogActivity("VSCode: Re-download retry -- " + ext + " OK");
                             else
                                 stillFailed.Add(ext);
-                            await Task.Delay(300);
+                            await Task.Delay(300, cancellationToken);
                         }
 
                         if (stillFailed.Count > 0)
@@ -2535,6 +2712,8 @@ namespace VSCodePortableInstaller
             catch (Exception ex)
             {
                 LogActivity("VSCode: Extension installation error -- " + ex.Message);
+                if (ex is OperationCanceledException)
+                    throw;
             }
         }
 
@@ -2763,7 +2942,9 @@ namespace VSCodePortableInstaller
             return fullPath;
         }
 
-        private async Task<Dictionary<string, string>> DownloadVSCodeExtensionPackagesAsync(IList<string> extensions, string tempVsixDir, string componentName)
+        private async Task<Dictionary<string, string>> DownloadVSCodeExtensionPackagesAsync(
+            IList<string> extensions, string tempVsixDir, string componentName,
+            System.Threading.CancellationToken cancellationToken)
         {
             var results = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var resultLock = new object();
@@ -2784,11 +2965,12 @@ namespace VSCodePortableInstaller
 
                 var downloadTasks = extensions.Select(async ext =>
                 {
-                    await semaphore.WaitAsync();
+                    await semaphore.WaitAsync(cancellationToken);
                     // Per-extension hard timeout. HttpClient.Timeout only covers headers;
                     // a stalled CDN stream during CopyToAsync would otherwise hang forever.
-                    using (var perExtCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(45)))
+                    using (var perExtCts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                     {
+                        perExtCts.CancelAfter(TimeSpan.FromSeconds(45));
                         var perExtToken = perExtCts.Token;
                         try
                         {
@@ -2833,6 +3015,8 @@ namespace VSCodePortableInstaller
                         }
                         catch (OperationCanceledException)
                         {
+                            if (cancellationToken.IsCancellationRequested)
+                                throw;
                             LogActivity("VSCode: VSIX download timeout (45s) -- " + ext + " -- will retry later");
                         }
                         catch (Exception ex)
@@ -2899,6 +3083,10 @@ namespace VSCodePortableInstaller
                         versionUrl += "?targetPlatform=win32-x64";
                     return versionUrl;
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -2981,8 +3169,10 @@ namespace VSCodePortableInstaller
                 .Any(d => Path.GetFileName(d).StartsWith(extensionId + "-", StringComparison.OrdinalIgnoreCase));
         }
 
-        private async Task<Tuple<int, string, string, bool>> RunVSCodeCliProcess(string codeExe, string arguments, int timeoutMs)
+        private async Task<Tuple<int, string, string, bool>> RunVSCodeCliProcess(string codeExe, string arguments,
+            int timeoutMs, System.Threading.CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var psi = new ProcessStartInfo
             {
                 FileName = codeExe,
@@ -3002,16 +3192,25 @@ namespace VSCodePortableInstaller
                 var outputTask = process.StandardOutput.ReadToEndAsync();
                 var errorTask = process.StandardError.ReadToEndAsync();
 
-                bool finished = await Task.Run(() => process.WaitForExit(timeoutMs));
-                if (!finished)
+                using (cancellationToken.Register(() =>
                 {
-                    try { process.Kill(); } catch { }
-                }
+                    try { if (!process.HasExited) process.Kill(); }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                }))
+                {
+                    bool finished = await Task.Run(() => process.WaitForExit(timeoutMs)).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!finished)
+                    {
+                        try { process.Kill(); } catch { }
+                    }
 
-                string output = await outputTask;
-                string error = await errorTask;
-                int exitCode = finished ? process.ExitCode : -1;
-                return Tuple.Create(exitCode, output, error, finished);
+                    string output = await outputTask.ConfigureAwait(false);
+                    string error = await errorTask.ConfigureAwait(false);
+                    int exitCode = finished ? process.ExitCode : -1;
+                    return Tuple.Create(exitCode, output, error, finished);
+                }
             }
         }
 
