@@ -118,6 +118,56 @@ namespace VSCodePortableCommon
             return selected.ToString();
         }
 
+        public static async Task<string> ResolveAvailablePythonVersionAsync(string requestedVersion,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (!IsValidPythonVersionRequest(requestedVersion))
+                throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
+            if (string.IsNullOrWhiteSpace(requestedVersion))
+                return null;
+
+            const string releaseUrl = "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest";
+            string releaseJson;
+            using (var client = CreateClient())
+                releaseJson = await CommonHelper.GetStringWithRetryAsync(client, releaseUrl, cancellationToken)
+                    .ConfigureAwait(false);
+
+            var serializer = new JavaScriptSerializer();
+            var release = serializer.Deserialize<Dictionary<string, object>>(releaseJson);
+            object releaseAssets;
+            if (release == null || !release.TryGetValue("assets", out releaseAssets))
+                throw new InvalidDataException("The Python release response did not contain assets.");
+
+            var downloads = new List<Dictionary<string, object>>();
+            foreach (var item in (System.Collections.IEnumerable)releaseAssets)
+            {
+                var asset = item as Dictionary<string, object>;
+                if (asset == null || !asset.ContainsKey("name"))
+                    continue;
+
+                string assetName = Convert.ToString(asset["name"]);
+                var match = Regex.Match(assetName,
+                    @"^cpython-(3\.\d+\.\d+)\+\d+-x86_64-pc-windows-msvc-install_only(?:_stripped)?\.tar\.gz$",
+                    RegexOptions.IgnoreCase);
+                if (!match.Success)
+                    continue;
+
+                downloads.Add(new Dictionary<string, object>
+                {
+                    { "version", match.Groups[1].Value },
+                    { "implementation", "cpython" },
+                    { "os", "windows" },
+                    { "arch", "x86_64" },
+                    { "variant", "default" }
+                });
+            }
+
+            if (downloads.Count == 0)
+                throw new InvalidDataException("The Python release contains no stable Windows x64 CPython assets.");
+
+            return SelectPythonVersion(serializer.Serialize(downloads), requestedVersion);
+        }
+
         private static List<Version> GetStablePythonVersions(string json)
         {
             var serializer = new JavaScriptSerializer();
@@ -157,7 +207,7 @@ namespace VSCodePortableCommon
             };
             ApplyEnvironment(startInfo, baseDir);
             startInfo.EnvironmentVariables["UV_HTTP_TIMEOUT"] = "30";
-            startInfo.EnvironmentVariables["UV_HTTP_RETRIES"] = "0";
+            startInfo.EnvironmentVariables["UV_HTTP_RETRIES"] = "1";
             cancellationToken.ThrowIfCancellationRequested();
             using (var process = Process.Start(startInfo))
             {
@@ -211,7 +261,8 @@ namespace VSCodePortableCommon
         }
 
         public static async Task<string> InstallUvAsync(string baseDir, string targetVersion,
-            System.Threading.CancellationToken cancellationToken, Action<string> logActivity = null)
+            System.Threading.CancellationToken cancellationToken, Action<string> logActivity = null,
+            Action<long, long> reportProgress = null)
         {
             if (!string.IsNullOrEmpty(targetVersion) && !Regex.IsMatch(targetVersion, @"^\d+\.\d+\.\d+$"))
                 throw new ArgumentException("Invalid uv release version.", "targetVersion");
@@ -225,12 +276,10 @@ namespace VSCodePortableCommon
                 {
                     string releaseUrl = "https://api.github.com/repos/astral-sh/uv/releases/" +
                         (string.IsNullOrEmpty(targetVersion) ? "latest" : "tags/" + targetVersion);
-                    string json;
-                    using (var response = await client.GetAsync(releaseUrl, cancellationToken).ConfigureAwait(false))
-                    {
-                        response.EnsureSuccessStatusCode();
-                        json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-                    }
+                    if (logActivity != null)
+                        logActivity("Resolving uv release metadata...");
+                    string json = await CommonHelper.GetStringWithRetryAsync(client, releaseUrl, cancellationToken)
+                        .ConfigureAwait(false);
                     var release = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
                     string version = Convert.ToString(release["tag_name"]).TrimStart('v');
                     if (Convert.ToBoolean(release["prerelease"]) || !Regex.IsMatch(version, @"^\d+\.\d+\.\d+$"))
@@ -247,8 +296,11 @@ namespace VSCodePortableCommon
                     if (asset == null || !asset.ContainsKey("digest") ||
                         !Convert.ToString(asset["digest"]).StartsWith("sha256:", StringComparison.Ordinal))
                         throw new InvalidDataException("The Windows uv archive or its SHA256 digest is missing.");
+                    if (logActivity != null)
+                        logActivity("Downloading uv " + version + " for Windows x64...");
                     await CommonHelper.DownloadFileWithRetryAsync(client,
-                        Convert.ToString(asset["browser_download_url"]), archive, cancellationToken).ConfigureAwait(false);
+                        Convert.ToString(asset["browser_download_url"]), archive, cancellationToken,
+                        reportProgress).ConfigureAwait(false);
                     string digest;
                     using (var stream = File.OpenRead(archive))
                     using (var sha256 = SHA256.Create())
@@ -795,6 +847,96 @@ namespace VSCodePortableCommon
 
         private static readonly TimeSpan DownloadIdleTimeout = TimeSpan.FromSeconds(30);
 
+        private static bool IsTransientHttpStatusCode(int statusCode)
+        {
+            return statusCode == 408 || statusCode == 429 || statusCode >= 500;
+        }
+
+        private static TimeSpan GetHttpRetryDelay(int attempt,
+            System.Net.Http.Headers.RetryConditionHeaderValue retryAfter)
+        {
+            TimeSpan delay = TimeSpan.FromSeconds(Math.Min(30, Math.Pow(2, attempt - 1)));
+            if (retryAfter != null)
+            {
+                if (retryAfter.Delta.HasValue)
+                    delay = retryAfter.Delta.Value;
+                else if (retryAfter.Date.HasValue)
+                    delay = retryAfter.Date.Value - DateTimeOffset.UtcNow;
+            }
+
+            if (delay < TimeSpan.Zero)
+                return TimeSpan.Zero;
+            return delay > TimeSpan.FromSeconds(30) ? TimeSpan.FromSeconds(30) : delay;
+        }
+
+        public static async Task<string> GetStringWithRetryAsync(HttpClient client, string url,
+            System.Threading.CancellationToken cancellationToken, int maxAttempts = 4)
+        {
+            if (client == null)
+                throw new ArgumentNullException("client");
+            if (string.IsNullOrWhiteSpace(url))
+                throw new ArgumentException("A request URL is required.", "url");
+            if (maxAttempts < 1)
+                throw new ArgumentOutOfRangeException("maxAttempts");
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                TimeSpan retryDelay = GetHttpRetryDelay(attempt, null);
+                try
+                {
+                    HttpResponseMessage response;
+                    using (var request = new HttpRequestMessage(HttpMethod.Get, url))
+                    {
+                        response = await SendDownloadRequestAsync(client, request, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        int statusCode = (int)response.StatusCode;
+                        if (IsTransientHttpStatusCode(statusCode) && attempt < maxAttempts)
+                        {
+                            retryDelay = GetHttpRetryDelay(attempt, response.Headers.RetryAfter);
+                            response.Dispose();
+                        }
+                        else
+                        {
+                            response.Dispose();
+                            if (IsTransientHttpStatusCode(statusCode))
+                                throw new HttpRequestException("Transient HTTP response: " + statusCode + ".");
+                            throw new InvalidDataException("Request failed with HTTP " + statusCode + ".");
+                        }
+                    }
+                    else
+                    {
+                        using (response)
+                            return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (attempt == maxAttempts)
+                        throw;
+                }
+                catch (TimeoutException)
+                {
+                    if (attempt == maxAttempts)
+                        throw;
+                }
+                catch (HttpRequestException)
+                {
+                    if (attempt == maxAttempts)
+                        throw;
+                }
+
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+            }
+
+            throw new InvalidOperationException("The HTTP request retry loop ended unexpectedly.");
+        }
+
         public static async Task<HttpResponseMessage> SendDownloadRequestAsync(
             HttpClient client,
             HttpRequestMessage request,
@@ -816,6 +958,61 @@ namespace VSCodePortableCommon
                     throw;
                 }
             }
+        }
+
+        public static async Task<HttpResponseMessage> SendHeadRequestWithRetryAsync(
+            HttpClient client,
+            string url,
+            System.Threading.CancellationToken cancellationToken,
+            int maxAttempts = 4)
+        {
+            if (client == null)
+                throw new ArgumentNullException("client");
+            if (string.IsNullOrWhiteSpace(url))
+                throw new ArgumentException("A request URL is required.", "url");
+            if (maxAttempts < 1)
+                throw new ArgumentOutOfRangeException("maxAttempts");
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                TimeSpan retryDelay = GetHttpRetryDelay(attempt, null);
+                try
+                {
+                    HttpResponseMessage response;
+                    using (var request = new HttpRequestMessage(HttpMethod.Head, url))
+                    {
+                        response = await SendDownloadRequestAsync(client, request, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    if (!IsTransientHttpStatusCode((int)response.StatusCode) || attempt == maxAttempts)
+                        return response;
+
+                    retryDelay = GetHttpRetryDelay(attempt, response.Headers.RetryAfter);
+                    response.Dispose();
+                }
+                catch (OperationCanceledException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (attempt == maxAttempts)
+                        throw;
+                }
+                catch (TimeoutException)
+                {
+                    if (attempt == maxAttempts)
+                        throw;
+                }
+                catch (HttpRequestException)
+                {
+                    if (attempt == maxAttempts)
+                        throw;
+                }
+
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
+            }
+
+            throw new InvalidOperationException("The HTTP request retry loop ended unexpectedly.");
         }
 
         public static async Task<int> ReadDownloadChunkAsync(
@@ -848,7 +1045,7 @@ namespace VSCodePortableCommon
             string destPath,
             System.Threading.CancellationToken cancellationToken,
             Action<long, long> reportProgress = null,
-            int maxAttempts = 3)
+            int maxAttempts = 2)
         {
             if (client == null)
                 throw new ArgumentNullException("client");
@@ -865,6 +1062,7 @@ namespace VSCodePortableCommon
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string partialPath = destPath + "." + Guid.NewGuid().ToString("N") + ".part";
+                TimeSpan retryDelay = GetHttpRetryDelay(attempt, null);
 
                 try
                 {
@@ -874,8 +1072,11 @@ namespace VSCodePortableCommon
                         int statusCode = (int)response.StatusCode;
                         if (!response.IsSuccessStatusCode)
                         {
-                            if (statusCode == 408 || statusCode == 429 || statusCode >= 500)
+                            if (IsTransientHttpStatusCode(statusCode))
+                            {
+                                retryDelay = GetHttpRetryDelay(attempt, response.Headers.RetryAfter);
                                 throw new HttpRequestException("Transient download response: HTTP " + statusCode + ".");
+                            }
 
                             throw new InvalidDataException("Download failed with HTTP " + statusCode + ".");
                         }
@@ -915,7 +1116,8 @@ namespace VSCodePortableCommon
                 {
                     if (cancellationToken.IsCancellationRequested ||
                         attempt == maxAttempts ||
-                        !(ex is HttpRequestException || ex is IOException || ex is TaskCanceledException))
+                        !(ex is HttpRequestException || ex is IOException ||
+                            ex is TaskCanceledException || ex is TimeoutException))
                     {
                         throw;
                     }
@@ -926,7 +1128,7 @@ namespace VSCodePortableCommon
                         File.Delete(partialPath);
                 }
 
-                await Task.Delay(TimeSpan.FromMilliseconds(400 * attempt), cancellationToken);
+                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -1231,21 +1433,20 @@ namespace VSCodePortableCommon
                     try
                     {
                         // Use GitHub redirect (no API rate limit) to get latest version
-                        using (var request = new HttpRequestMessage(HttpMethod.Head, "https://github.com/PowerShell/PowerShell/releases/latest"))
+                        using (var response = await CommonHelper.SendHeadRequestWithRetryAsync(
+                            client,
+                            "https://github.com/PowerShell/PowerShell/releases/latest",
+                            cancellationToken).ConfigureAwait(false))
                         {
-                            request.Headers.Add("User-Agent", "VSCode-Portable-Installer");
-                            using (var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false))
-                            {
-                                response.EnsureSuccessStatusCode();
-                                string redirectUrl = response.RequestMessage.RequestUri.ToString();
-                                var versionMatch = Regex.Match(redirectUrl, @"/releases/tag/v([\d\.]+)");
-                                if (!versionMatch.Success)
-                                    throw new InvalidDataException("Version not found in redirect URL: " + redirectUrl);
+                            response.EnsureSuccessStatusCode();
+                            string redirectUrl = response.RequestMessage.RequestUri.ToString();
+                            var versionMatch = Regex.Match(redirectUrl, @"/releases/tag/v([\d\.]+)");
+                            if (!versionMatch.Success)
+                                throw new InvalidDataException("Version not found in redirect URL: " + redirectUrl);
 
-                                version = versionMatch.Groups[1].Value;
-                                url = "https://github.com/PowerShell/PowerShell/releases/download/v" + version + "/PowerShell-" + version + "-win-x64.zip";
-                                logActivity("PowerShell 7: Found latest version " + version + " (via redirect)");
-                            }
+                            version = versionMatch.Groups[1].Value;
+                            url = "https://github.com/PowerShell/PowerShell/releases/download/v" + version + "/PowerShell-" + version + "-win-x64.zip";
+                            logActivity("PowerShell 7: Found latest version " + version + " (via redirect)");
                         }
 
                         if (string.IsNullOrWhiteSpace(url))
@@ -1259,7 +1460,6 @@ namespace VSCodePortableCommon
                     }
                     catch (Exception ex)
                     {
-                        // Fail immediately without retry
                         string errorMsg = "Failed to check PowerShell 7 version. ";
                         errorMsg += "Internet connection required for installation. ";
                         errorMsg += "Error: " + ex.Message;
@@ -1492,21 +1692,20 @@ namespace VSCodePortableCommon
                     try
                     {
                         // Use GitHub redirect (no API rate limit) to get latest version
-                        using (var request = new HttpRequestMessage(HttpMethod.Head, "https://github.com/JanDeDobbeleer/oh-my-posh/releases/latest"))
+                        using (var response = await CommonHelper.SendHeadRequestWithRetryAsync(
+                            client,
+                            "https://github.com/JanDeDobbeleer/oh-my-posh/releases/latest",
+                            cancellationToken).ConfigureAwait(false))
                         {
-                            request.Headers.Add("User-Agent", "VSCode-Portable-Installer");
-                            using (var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false))
-                            {
-                                response.EnsureSuccessStatusCode();
-                                string redirectUrl = response.RequestMessage.RequestUri.ToString();
-                                var versionMatch = Regex.Match(redirectUrl, @"/releases/tag/v([\d\.]+)");
-                                if (!versionMatch.Success)
-                                    throw new InvalidDataException("Version not found in redirect URL: " + redirectUrl);
+                            response.EnsureSuccessStatusCode();
+                            string redirectUrl = response.RequestMessage.RequestUri.ToString();
+                            var versionMatch = Regex.Match(redirectUrl, @"/releases/tag/v([\d\.]+)");
+                            if (!versionMatch.Success)
+                                throw new InvalidDataException("Version not found in redirect URL: " + redirectUrl);
 
-                                version = versionMatch.Groups[1].Value;
-                                downloadUrl = "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v" + version + "/install-x64.msix";
-                                logActivity("Oh My Posh: Found latest version " + version + " (via redirect)");
-                            }
+                            version = versionMatch.Groups[1].Value;
+                            downloadUrl = "https://github.com/JanDeDobbeleer/oh-my-posh/releases/download/v" + version + "/install-x64.msix";
+                            logActivity("Oh My Posh: Found latest version " + version + " (via redirect)");
                         }
                     }
                     catch (OperationCanceledException)
@@ -1515,7 +1714,6 @@ namespace VSCodePortableCommon
                     }
                     catch (Exception ex)
                     {
-                        // Fail immediately without retry
                         string errorMsg = "Failed to check Oh My Posh version. ";
                         errorMsg += "Internet connection required for installation. ";
                         errorMsg += "Error: " + ex.Message;
@@ -2156,8 +2354,10 @@ namespace VSCodePortableCommon
 
                     string url = "https://update.code.visualstudio.com/latest/win32-x64-archive/stable";
                     string resolvedVersion;
-                    using (var request = new HttpRequestMessage(HttpMethod.Head, url))
-                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead))
+                    using (var response = await CommonHelper.SendHeadRequestWithRetryAsync(
+                        client,
+                        url,
+                        default(System.Threading.CancellationToken)).ConfigureAwait(false))
                     {
                         response.EnsureSuccessStatusCode();
                         string resolvedUrl = response.RequestMessage.RequestUri.ToString();
