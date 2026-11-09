@@ -561,6 +561,7 @@ namespace VSCodePortableLauncher
 
                 string contents = File.ReadAllText(settingsPath);
                 bool changed = false;
+                contents = RemoveManagedDefaultInterpreterPath(contents, ref changed);
                 string pwshExe = Path.Combine(pvsDir, "data", "lib", "pwsh", "pwsh.exe");
                 contents = ReplaceManagedJsonPath(contents, "path", pwshExe, @"data\\lib\\pwsh\\pwsh.exe", ref changed);
                 if (originContents != null)
@@ -604,6 +605,17 @@ namespace VSCodePortableLauncher
                 error = ex.Message;
                 return false;
             }
+        }
+
+        static string RemoveManagedDefaultInterpreterPath(string settings, ref bool changed)
+        {
+            const string pattern = "(?m)^[\\t ]*\"python\\.defaultInterpreterPath\"[\\t ]*:[\\t ]*\"\\$\\{workspaceFolder\\}/\\.venv\"[\\t ]*,?[\\t ]*(?:\\r?\\n|$)";
+            Match match = Regex.Match(settings, pattern);
+            if (!match.Success)
+                return settings;
+
+            changed = true;
+            return settings.Substring(0, match.Index) + settings.Substring(match.Index + match.Length);
         }
 
         static string RestorePortableTerminalPath(string settings, string originSettings, ref bool changed)

@@ -67,11 +67,13 @@
     }
   },
 
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv",
   "python.terminal.activateEnvironment": true,
   "python.useEnvironmentsExtension": true,
   "python-envs.alwaysUseUv": true,
   "python-envs.terminal.autoActivationType": "command",
+  "python.analysis.extraPaths": [
+    "${execPath}/../data/venvs/global/Lib/site-packages"
+  ],
   "python.analysis.diagnosticSeverityOverrides": {
     "reportMissingModuleSource": "none"
   },

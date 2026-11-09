@@ -67,6 +67,8 @@ namespace VSCodePortableInstaller
         private int completedComponents;
         private bool installCompleted;
         private bool installStarted;
+        private bool installationSucceeded;
+        private bool installDirectoryWasEmptyAtStart;
         private bool pwsh7Failed;
         private bool criticalFailed;
         private volatile bool vscodeDownloadCompleted;
@@ -91,6 +93,7 @@ namespace VSCodePortableInstaller
             completedComponents = 0;
             installCompleted = false;
             installStarted = false;
+            installationSucceeded = false;
             pwsh7Failed = false;
 
             // Optimize network performance
@@ -352,20 +355,8 @@ namespace VSCodePortableInstaller
                 return;
             }
 
-            // If PowerShell 7 failed, retry only PowerShell 7 installation
-            if (installCompleted && pwsh7Failed && !criticalFailed)
+            if (installCompleted && (pwsh7Failed || criticalFailed))
             {
-                RetryPowerShell7Installation();
-                return;
-            }
-
-            // If critical components failed, retry full installation
-            if (installCompleted && criticalFailed)
-            {
-                if (!ValidatePythonVersionInput())
-                    return;
-                if (!await ValidatePythonVersionAvailabilityAsync(pythonVersionTextBox.Text.Trim()))
-                    return;
                 RetryInstallation();
                 return;
             }
@@ -391,9 +382,14 @@ namespace VSCodePortableInstaller
             if (!await ValidatePythonVersionAvailabilityAsync(requestedPythonVersion))
                 return;
 
+            installDirectoryWasEmptyAtStart = IsInstallDirectoryEmpty(path);
             cancelButton.Enabled = true;
+            cancelButton.Text = "Cancel";
+            CodeNixTheme.StyleSecondaryButton(cancelButton);
             installDir = path;
             installStarted = true;
+            installationSucceeded = false;
+            ResetProgressUI();
 
             // Initialize cancellation token for graceful cancellation
             installCancellationSource = new System.Threading.CancellationTokenSource();
@@ -425,6 +421,41 @@ namespace VSCodePortableInstaller
 
         private void CancelButton_Click(object sender, EventArgs e)
         {
+            if (installCompleted)
+            {
+                if (installationSucceeded && string.Equals(cancelButton.Text, "Run", StringComparison.Ordinal))
+                {
+                    string launcherPath = Path.Combine(installDir, "launcher.exe");
+                    try
+                    {
+                        if (!File.Exists(launcherPath))
+                            throw new FileNotFoundException("launcher.exe was not found.", launcherPath);
+
+                        using (var process = Process.Start(new ProcessStartInfo
+                        {
+                            FileName = launcherPath,
+                            WorkingDirectory = installDir,
+                            UseShellExecute = false
+                        }))
+                        {
+                            if (process == null)
+                                throw new InvalidOperationException("The launcher process did not start.");
+                        }
+                        Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(this, "Could not launch VS Code: " + ex.Message,
+                            "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                else
+                {
+                    Close();
+                }
+                return;
+            }
+
             if (!installStarted)
             {
                 Close();
@@ -612,7 +643,10 @@ namespace VSCodePortableInstaller
         {
             // Kill any running VSCode or PowerShell processes from installation directory
             UpdateProgressLabel(progressLabel, "Terminating running processes", setBaseMessage);
-            KillInstallationProcesses();
+            if (installDirectoryWasEmptyAtStart)
+                KillInstallationProcesses();
+            else
+                LogActivity("Not terminating processes in pre-existing installation directory: " + installDir);
 
             // Brief delay to ensure processes are terminated
             System.Threading.Thread.Sleep(1000);
@@ -643,7 +677,7 @@ namespace VSCodePortableInstaller
 
             // 2. Delete installation directory (PVS folder)
             UpdateProgressLabel(progressLabel, "Deleting installation directory", setBaseMessage);
-            if (!string.IsNullOrEmpty(installDir) && Directory.Exists(installDir))
+            if (installDirectoryWasEmptyAtStart && !string.IsNullOrEmpty(installDir) && Directory.Exists(installDir))
             {
                 try
                 {
@@ -703,6 +737,10 @@ namespace VSCodePortableInstaller
                 {
                     LogActivity("Failed to delete installation directory: " + ex.Message);
                 }
+            }
+            else if (!string.IsNullOrEmpty(installDir) && Directory.Exists(installDir))
+            {
+                LogActivity("Preserving pre-existing installation directory: " + installDir);
             }
 
             LogActivity("Cleanup completed");
@@ -860,6 +898,22 @@ namespace VSCodePortableInstaller
             return true;
         }
 
+        private bool IsInstallDirectoryEmpty(string path)
+        {
+            if (!Directory.Exists(path))
+                return true;
+
+            try
+            {
+                return Directory.GetFileSystemEntries(path).Length == 0;
+            }
+            catch (Exception ex)
+            {
+                LogActivity("Could not inspect installation directory; cleanup will preserve it: " + ex.Message);
+                return false;
+            }
+        }
+
         private void ShowProgressUI()
         {
             if (InvokeRequired)
@@ -984,8 +1038,6 @@ namespace VSCodePortableInstaller
 
                 // Collect all version info from staged parallel phases
                 var allVersions = new Dictionary<string, string>();
-                bool hasCriticalError = false;
-                int failedCount = 0;
 
                 foreach (var result in phase1Results)
                 {
@@ -998,39 +1050,45 @@ namespace VSCodePortableInstaller
                         allVersions[kvp.Key] = kvp.Value;
                 }
 
-                // Check if critical components failed (VSCode or Python)
-                if (!allVersions.ContainsKey("VSCODE_VERSION"))
+                var requiredPackageVersions = new Dictionary<string, string>
                 {
-                    LogActivity("Critical: VSCode installation failed or incomplete");
-                    hasCriticalError = true;
-                    failedCount++;
+                    { "Fonts", "FONTS_VERSION" },
+                    { "PowerShell 7", "PWSH7_VERSION" },
+                    { "Oh My Posh", "OHMYPOSH_VERSION" },
+                    { "PSFzf", "PSFZF_VERSION" },
+                    { "modern-unix-win", "MODERN_UNIX_WIN_VERSION" },
+                    { "VS Code", "VSCODE_VERSION" },
+                    { "VS Code extensions", "VSCODE_EXTENSIONS_VERSION" },
+                    { "Python", "PYTHON_VERSION" },
+                    { "uv", "UV_VERSION" }
+                };
+                var failedPackages = new List<string>();
+
+                foreach (var requiredPackage in requiredPackageVersions)
+                {
+                    string installedVersion;
+                    if (!allVersions.TryGetValue(requiredPackage.Value, out installedVersion) ||
+                        string.IsNullOrWhiteSpace(installedVersion))
+                        failedPackages.Add(requiredPackage.Key);
                 }
 
-                bool pythonFailed = !allVersions.ContainsKey("PYTHON_VERSION");
-                if (pythonFailed)
+                if (failedPackages.Count > 0)
                 {
-                    LogActivity("Critical: Python installation failed or incomplete");
-                    hasCriticalError = true;
-                    failedCount++;
-                }
+                    if (failedPackages.Contains("Fonts"))
+                        UpdateComponentStatus("Fonts", "⚠ Installation failed", 0);
+                    if (failedPackages.Contains("PowerShell 7") || failedPackages.Contains("Oh My Posh") ||
+                        failedPackages.Contains("PSFzf") || failedPackages.Contains("modern-unix-win"))
+                        UpdateComponentStatus("PowerShell 7", "⚠ One or more packages failed", 0);
+                    if (failedPackages.Contains("VS Code") || failedPackages.Contains("VS Code extensions"))
+                        UpdateComponentStatus("VSCode", "⚠ Installation failed", 0);
+                    if (failedPackages.Contains("Python") || failedPackages.Contains("uv"))
+                        UpdateComponentStatus("Python", "⚠ Installation failed", 0);
 
-                // If critical components failed, don't proceed with final configuration
-                if (hasCriticalError)
-                {
-                    UpdateCurrentTask("⚠ Installation incomplete - " + failedCount + " component(s) failed");
-                    LogActivity("Installation incomplete: " + failedCount + " critical component(s) failed");
-                    SaveInstallLog();
-
-                    criticalFailed = true;
-                    installCompleted = true;
-                    Invoke(new Action(() =>
-                    {
-                        if (pythonFailed)
-                            pythonVersionTextBox.Enabled = true;
-                        RestoreInstallButtonStyle("Retry");
-                        // Keep Cancel button enabled so user can always exit
-                    }));
-                    return;
+                    string failureMessage = "Required package installation failed: " +
+                        string.Join(", ", failedPackages.ToArray());
+                    UpdateCurrentTask("⚠ Installation failed - " + failedPackages.Count + " package(s)");
+                    LogActivity(failureMessage);
+                    throw new InvalidOperationException(failureMessage);
                 }
 
                 // Final configuration
@@ -1061,18 +1119,15 @@ namespace VSCodePortableInstaller
                 // Save installation log to codenix.log
                 SaveInstallLog();
 
+                installationSucceeded = true;
                 installCompleted = true;
                 Invoke(new Action(() =>
                 {
-                    if (pwsh7Failed)
-                    {
-                        RestoreInstallButtonStyle("Retry PowerShell 7");
-                    }
-                    else
-                    {
-                        RestoreInstallButtonStyle("Exit");
-                    }
-                    cancelButton.Enabled = false;
+                    RestoreInstallButtonStyle("Exit");
+                    CodeNixTheme.StyleSecondaryButton(installButton);
+                    cancelButton.Text = "Run";
+                    cancelButton.Enabled = true;
+                    CodeNixTheme.StylePrimaryButton(cancelButton);
                 }));
             }
             catch (OperationCanceledException)
@@ -1085,18 +1140,41 @@ namespace VSCodePortableInstaller
             catch (Exception ex)
             {
                 LogActivity("Installation error: " + ex.Message);
-                SaveInstallLog();
                 criticalFailed = true;
                 installCompleted = true;
+                installationSucceeded = false;
                 if (installTimer != null)
                     installTimer.Stop();
+
+                try
+                {
+                    CleanupOnCancel();
+                }
+                catch (Exception cleanupException)
+                {
+                    LogActivity("Installation cleanup failed: " + cleanupException.Message);
+                }
+                SaveInstallLog(true);
+
+                bool installFolderRemoved = string.IsNullOrEmpty(installDir) || !Directory.Exists(installDir);
                 Invoke(new Action(() =>
                 {
                     StopElapsedTimer();
                     pythonVersionTextBox.Enabled = true;
+                    installPathTextBox.Enabled = true;
+                    browseButton.Enabled = true;
                     RestoreInstallButtonStyle("Retry");
+                    cancelButton.Text = "Exit";
                     cancelButton.Enabled = true;
-                    MessageBox.Show(this, "Installation error: " + ex.Message, "Installation Error",
+                    CodeNixTheme.StyleSecondaryButton(cancelButton);
+                    UpdateCurrentTask(installFolderRemoved
+                        ? "Installation failed. Partial files were removed."
+                        : "Installation failed. Cleanup was incomplete.");
+                    string cleanupMessage = installFolderRemoved
+                        ? "The partial installation folder was removed."
+                        : "Some files may remain in " + installDir + ".";
+                    MessageBox.Show(this, "Installation error: " + ex.Message + "\r\n\r\n" + cleanupMessage,
+                        "Installation Failed",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }));
             }
@@ -1112,7 +1190,7 @@ namespace VSCodePortableInstaller
 
             // Determine which controls to update based on component name
             Label statusLabel = null;
-            ProgressBar progressBar = null;
+            CodeNixProgressBar progressBar = null;
 
             switch (componentName)
             {
@@ -1180,7 +1258,8 @@ namespace VSCodePortableInstaller
             statusLabel.ForeColor = statusColor;
 
             // Update progress bar
-            progressBar.Value = Math.Min(progress, 100);
+            progressBar.Value = Math.Max(progressBar.Value, Math.Max(progressBar.Minimum,
+                Math.Min(progress, progressBar.Maximum)));
 
             overallStatusOverride = null;
 
@@ -1250,7 +1329,7 @@ namespace VSCodePortableInstaller
             totalProgress += pythonProgressBar.Value * weights["Python"];
 
             int avgProgress = (int)Math.Min(totalProgress, 100);
-            overallProgress.Value = avgProgress;
+            overallProgress.Value = Math.Max(overallProgress.Value, avgProgress);
 
             // Count completed components (progress >= 100)
             int completed = 0;
@@ -1278,6 +1357,32 @@ namespace VSCodePortableInstaller
                 completedLabel.Text = string.Format("Overall Progress: {0}% complete ({1}/{2} ready)", overallProgress.Value, completedComponents, totalComponents);
             else
                 completedLabel.Text = string.Format("Overall Progress: {0}% complete", overallProgress.Value);
+        }
+
+        private void ResetProgressUI()
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(ResetProgressUI));
+                return;
+            }
+
+            fontsProgressBar.Value = 0;
+            pwshProgressBar.Value = 0;
+            vscodeProgressBar.Value = 0;
+            pythonProgressBar.Value = 0;
+            overallProgress.Value = 0;
+            fontsStatusLabel.Text = "Waiting";
+            pwshStatusLabel.Text = "Waiting";
+            vscodeStatusLabel.Text = "Waiting";
+            pythonStatusLabel.Text = "Waiting";
+            fontsStatusLabel.ForeColor = CodeNixTheme.TextTertiary;
+            pwshStatusLabel.ForeColor = CodeNixTheme.TextTertiary;
+            vscodeStatusLabel.ForeColor = CodeNixTheme.TextTertiary;
+            pythonStatusLabel.ForeColor = CodeNixTheme.TextTertiary;
+            completedComponents = 0;
+            overallStatusOverride = null;
+            UpdateOverallProgress();
         }
 
         private void UpdateCurrentTask(string message)
@@ -1531,11 +1636,22 @@ namespace VSCodePortableInstaller
             activityLog.ScrollToCaret();
         }
 
-        private void SaveInstallLog()
+        private void SaveInstallLog(bool preserveOutsideInstallDir = false)
         {
             try
             {
-                string logPath = Path.Combine(installDir, CommonHelper.RuntimeLogFileName);
+                string logPath;
+                if (preserveOutsideInstallDir)
+                {
+                    string logDirectory = Path.Combine(Path.GetTempPath(), "CodeNix", "logs");
+                    Directory.CreateDirectory(logDirectory);
+                    logPath = Path.Combine(logDirectory,
+                        "installation-" + installStartTime.ToString("yyyyMMdd-HHmmss") + ".log");
+                }
+                else
+                {
+                    logPath = Path.Combine(installDir, CommonHelper.RuntimeLogFileName);
+                }
                 string logHeader = "\r\n" + new string('=', 80) + "\r\n";
                 logHeader += "Installation Session: " + installStartTime.ToString("yyyy-MM-dd HH:mm:ss") + "\r\n";
                 logHeader += new string('=', 80) + "\r\n";
@@ -1565,256 +1681,16 @@ namespace VSCodePortableInstaller
             }));
         }
 
-        private void RetryPowerShell7Installation()
-        {
-            LogActivity("=== Retrying PowerShell 7 installation ===");
-            pwsh7Failed = false;
-            installCompleted = false;
-
-            // Create new cancellation token for retry
-            installCancellationSource = new System.Threading.CancellationTokenSource();
-            var token = installCancellationSource.Token;
-
-            // Reset button state with clear disabled visual appearance
-            Invoke(new Action(() =>
-            {
-                SetInstallButtonInstallingState();
-            }));
-
-            // Retry PowerShell 7 installation
-            vscodeDownloadCompleted = true;
-            installationTask = Task.Run(async () =>
-            {
-                try
-                {
-                    var versions = await InstallPowerShell7Async(token);
-
-                    // Update codenix.info with PowerShell versions
-                    if (versions.Count > 0)
-                    {
-                        string pvsInfoPath = Path.Combine(installDir, "data", CommonHelper.RuntimeInfoFileName);
-                        if (File.Exists(pvsInfoPath))
-                        {
-                            var lines = File.ReadAllLines(pvsInfoPath).ToList();
-
-                            // Update or add PowerShell-related versions
-                            foreach (var kvp in versions)
-                            {
-                                int existingIdx = lines.FindIndex(l => l.StartsWith(kvp.Key + "="));
-                                string versionLine = kvp.Key + "=" + kvp.Value;
-
-                                if (existingIdx >= 0)
-                                    lines[existingIdx] = versionLine;
-                                else
-                                    lines.Add(versionLine);
-                            }
-
-                            File.WriteAllLines(pvsInfoPath, lines, Encoding.UTF8);
-                            LogActivity("PowerShell 7: codenix.info updated");
-                        }
-                    }
-
-                    if (pwsh7Failed)
-                    {
-                        installCompleted = true;
-                        LogActivity("PowerShell 7: Retry failed");
-                        Invoke(new Action(() =>
-                        {
-                            RestoreInstallButtonStyle("Retry PowerShell 7");
-                        }));
-                    }
-                    else
-                    {
-                        installCompleted = true;
-                        LogActivity("PowerShell 7: Retry successful!");
-                        UpdateCurrentTask("✓ All components installed successfully!");
-                        Invoke(new Action(() =>
-                        {
-                            RestoreInstallButtonStyle("Exit");
-                        }));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogActivity("PowerShell 7: Retry error - " + ex.Message);
-                    pwsh7Failed = true;
-                    installCompleted = true;
-                    Invoke(new Action(() =>
-                    {
-                        RestoreInstallButtonStyle("Retry PowerShell 7");
-                    }));
-                }
-            });
-        }
-
-        private static bool NeedsVSCodeRetry(string installDirectory)
-        {
-            return !File.Exists(Path.Combine(installDirectory, "Code.exe"));
-        }
-
-        private static bool NeedsPythonRetry(string installDirectory, Dictionary<string, string> installedVersions)
-        {
-            string pythonVersion;
-            Version parsedVersion;
-            if (!installedVersions.ContainsKey("UV_VERSION") ||
-                !File.Exists(PortablePython.UvPath(installDirectory)) ||
-                !installedVersions.TryGetValue("PYTHON_VERSION", out pythonVersion) ||
-                !Version.TryParse(pythonVersion, out parsedVersion) || parsedVersion.Major != 3 ||
-                parsedVersion.Build < 0 || parsedVersion.Revision >= 0)
-                return true;
-
-            string runtime = Path.Combine(PortablePython.RuntimeDirectory(installDirectory),
-                "cpython-" + pythonVersion + "-windows-x86_64-none", "python.exe");
-            string globalEnvironment = PortablePython.GlobalEnvironmentDirectory(installDirectory);
-            return !File.Exists(runtime) ||
-                !File.Exists(PortablePython.GlobalPythonExecutable(installDirectory)) ||
-                !File.Exists(Path.Combine(globalEnvironment, "pyvenv.cfg"));
-        }
-
         private void RetryInstallation()
         {
-            string requestedPythonVersion = pythonVersionTextBox.Text.Trim();
-            LogActivity("=== Retrying failed components ===");
+            LogActivity("=== Retrying full installation ===");
             criticalFailed = false;
+            pwsh7Failed = false;
             installCompleted = false;
-
-            // Create new cancellation token for retry
-            installCancellationSource = new System.Threading.CancellationTokenSource();
-            var token = installCancellationSource.Token;
-
-            // Set button to installing state
-            Invoke(new Action(() =>
-            {
-                SetInstallButtonInstallingState();
-                pythonVersionTextBox.Enabled = false;
-            }));
-
-            // Only retry components that failed (not re-install successful ones)
-            installationTask = Task.Run(async () =>
-            {
-                try
-                {
-                    var allVersions = new Dictionary<string, string>();
-
-                    // Read existing codenix.info to get already installed versions
-                    string pvsInfoPath = Path.Combine(installDir, CommonHelper.RuntimeInfoFileName);
-                    if (File.Exists(pvsInfoPath))
-                    {
-                        var lines = File.ReadAllLines(pvsInfoPath);
-                        foreach (var line in lines)
-                        {
-                            if (line.Contains("="))
-                            {
-                                var parts = line.Split('=');
-                                if (parts.Length == 2)
-                                    allVersions[parts[0].Trim()] = parts[1].Trim();
-                            }
-                        }
-                        LogActivity("Found " + allVersions.Count + " already installed components");
-                    }
-
-                    // Check which critical components need retry (check both codenix.info AND disk)
-                    bool needVSCode = NeedsVSCodeRetry(installDir);
-                    bool needPython = NeedsPythonRetry(installDir, allVersions);
-
-                    if (needVSCode)
-                    {
-                        LogActivity("Retrying VSCode installation...");
-                        var vscodeVersions = await InstallVSCodeFlowAsync(token);
-                        foreach (var kvp in vscodeVersions)
-                            allVersions[kvp.Key] = kvp.Value;
-                    }
-                    else if (!allVersions.ContainsKey("VSCODE_VERSION"))
-                    {
-                        // Code.exe exists on disk but version unknown - detect it
-                        allVersions["VSCODE_VERSION"] = DetectInstalledVSCodeVersion();
-                        LogActivity("VSCode: Already installed on disk at version " + allVersions["VSCODE_VERSION"] + ", skipping re-download");
-                        UpdateComponentStatus("VSCode", "✓ Completed", 100);
-                    }
-
-                    if (needPython)
-                    {
-                        LogActivity("Retrying Python installation...");
-                        var pythonVersions = await InstallPythonCoreAsync(token, requestedPythonVersion);
-                        foreach (var kvp in pythonVersions)
-                            allVersions[kvp.Key] = kvp.Value;
-                    }
-
-                    // Check if retry succeeded
-                    bool pythonFailed = !allVersions.ContainsKey("PYTHON_VERSION");
-                    if (!allVersions.ContainsKey("VSCODE_VERSION") || pythonFailed)
-                    {
-                        int failedCount = 0;
-                        if (!allVersions.ContainsKey("VSCODE_VERSION"))
-                        {
-                            LogActivity("Critical: VSCode installation still failed");
-                            failedCount++;
-                        }
-                        if (!allVersions.ContainsKey("PYTHON_VERSION"))
-                        {
-                            LogActivity("Critical: Python installation still failed");
-                            failedCount++;
-                        }
-
-                        UpdateCurrentTask("⚠ Installation still incomplete - " + failedCount + " component(s) failed");
-                        LogActivity("Retry incomplete: " + failedCount + " critical component(s) still failed");
-
-                        criticalFailed = true;
-                        installCompleted = true;
-                        Invoke(new Action(() =>
-                        {
-                            if (pythonFailed)
-                                pythonVersionTextBox.Enabled = true;
-                            RestoreInstallButtonStyle("Retry");
-                        }));
-                        return;
-                    }
-
-                    // Success! Complete Phase 2 configuration
-                    LogActivity("All critical components now installed successfully");
-                    UpdateCurrentTask("Creating configuration files...");
-
-                    await CreatePvsInfo(allVersions);
-                    await CopyLauncher();
-                    await CreateShortcuts();
-
-                    UpdateCurrentTask("✓ Installation completed successfully!");
-                    LogActivity("Installation completed successfully!");
-                    LogActivity("Installation directory: " + installDir);
-
-                    // Stop timer and log performance
-                    if (installTimer != null)
-                    {
-                        installTimer.Stop();
-                        var elapsed = installTimer.Elapsed;
-                        string elapsedStr = string.Format("{0:D2}:{1:D2}:{2:D2}.{3:D3}",
-                            elapsed.Hours, elapsed.Minutes, elapsed.Seconds, elapsed.Milliseconds);
-                        LogActivity("=== Installation completed at " + DateTime.Now.ToString("HH:mm:ss") + " ===");
-                        LogActivity("*** Total installation time: " + elapsedStr + " ***");
-                    }
-
-                    // Save installation log
-                    SaveInstallLog();
-
-                    installCompleted = true;
-                    Invoke(new Action(() =>
-                    {
-                        RestoreInstallButtonStyle("Exit");
-                    }));
-                }
-                catch (Exception ex)
-                {
-                    LogActivity("Retry error: " + ex.Message);
-                    UpdateCurrentTask("⚠ Retry failed: " + ex.Message);
-                    criticalFailed = true;
-                    installCompleted = true;
-                    Invoke(new Action(() =>
-                    {
-                        pythonVersionTextBox.Enabled = true;
-                        RestoreInstallButtonStyle("Retry");
-                    }));
-                }
-            });
+            installStarted = false;
+            installationSucceeded = false;
+            RestoreInstallButtonStyle("Install");
+            InstallButton_Click(installButton, EventArgs.Empty);
         }
 
         // Installation methods
@@ -1843,6 +1719,7 @@ namespace VSCodePortableInstaller
 
                 if (hasNerd && hasDalseo)
                 {
+                    versions["FONTS_VERSION"] = "embedded";
                     UpdateComponentStatus(componentName, "✓ Already installed", 100);
                     LogActivity("Fonts: Already installed");
                     return Task.FromResult(versions);
@@ -1904,7 +1781,13 @@ namespace VSCodePortableInstaller
                         CreateNoWindow = true
                     };
                     using (var process = Process.Start(psi))
+                    {
+                        if (process == null)
+                            throw new InvalidOperationException("Could not start font registration.");
                         process.WaitForExit();
+                        if (process.ExitCode != 0)
+                            throw new InvalidOperationException("Nerd Font registration failed.");
+                    }
                 }
 
                 if (File.Exists(dalseoFontPath))
@@ -1917,10 +1800,20 @@ namespace VSCodePortableInstaller
                         CreateNoWindow = true
                     };
                     using (var process = Process.Start(psi))
+                    {
+                        if (process == null)
+                            throw new InvalidOperationException("Could not start font registration.");
                         process.WaitForExit();
+                        if (process.ExitCode != 0)
+                            throw new InvalidOperationException("Dalseo font registration failed.");
+                    }
                 }
 
+                if (!File.Exists(nerdFontPath) || !File.Exists(dalseoFontPath))
+                    throw new FileNotFoundException("One or more embedded fonts could not be installed.");
+
                 UpdateComponentStatus(componentName, "✓ Completed", 100);
+                versions["FONTS_VERSION"] = "embedded";
                 LogActivity("Fonts: Installation completed");
             }
             catch (Exception ex)
@@ -1939,15 +1832,27 @@ namespace VSCodePortableInstaller
         // Wrapper methods for new parallel structure
         private async Task<Dictionary<string, string>> InstallPowerShell7Async(System.Threading.CancellationToken cancellationToken)
         {
-            var versions = await InstallPowerShell7CoreAsync(cancellationToken);
-            if (cancellationToken.IsCancellationRequested || pwsh7Failed || !versions.ContainsKey("PWSH7_VERSION"))
+            try
+            {
+                var versions = await InstallPowerShell7CoreAsync(cancellationToken);
+                if (cancellationToken.IsCancellationRequested || pwsh7Failed || !versions.ContainsKey("PWSH7_VERSION"))
+                    return versions;
+
+                var addonVersions = await InstallPowerShell7AddonsAsync(cancellationToken);
+                foreach (var kvp in addonVersions)
+                    versions[kvp.Key] = kvp.Value;
+
                 return versions;
-
-            var addonVersions = await InstallPowerShell7AddonsAsync(cancellationToken);
-            foreach (var kvp in addonVersions)
-                versions[kvp.Key] = kvp.Value;
-
-            return versions;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                UpdateComponentStatus("PowerShell 7", "⚠ " + ex.Message, 0);
+                throw;
+            }
         }
 
         private async Task<Dictionary<string, string>> InstallVSCodeFlowAsync(System.Threading.CancellationToken cancellationToken)
@@ -2301,6 +2206,7 @@ namespace VSCodePortableInstaller
 
             UpdateComponentStatus("VSCode", "Installing extensions...", 80);
             await InstallVSCodeExtensions("VSCode", cancellationToken);
+            versions["VSCODE_EXTENSIONS_VERSION"] = "installed";
             UpdateComponentStatus("VSCode", "✓ Completed", 100);
             LogActivity("VSCode: Installation completed");
 
@@ -2639,22 +2545,14 @@ namespace VSCodePortableInstaller
                                     using (var retryClient = new HttpClient(retryHandler))
                                     using (var retryCts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                                     {
-                                        retryCts.CancelAfter(TimeSpan.FromSeconds(120));
                                         retryClient.Timeout = TimeSpan.FromMinutes(MAX_DOWNLOAD_TIMEOUT_MINUTES);
                                         retryClient.DefaultRequestHeaders.Add("User-Agent", "VSCode-Portable-Installer");
                                         var retryToken = retryCts.Token;
                                         string packageUrl = await BuildVSCodeMarketplaceVsixUrlAsync(retryClient, ext, retryToken);
                                         if (!string.IsNullOrEmpty(packageUrl))
                                         {
-                                            using (var response = await retryClient.GetAsync(packageUrl, HttpCompletionOption.ResponseHeadersRead, retryToken))
-                                            {
-                                                response.EnsureSuccessStatusCode();
-                                                using (var contentStream = await response.Content.ReadAsStreamAsync())
-                                                using (var fileStream = new FileStream(vsixPath, FileMode.Create, FileAccess.Write, FileShare.None, DOWNLOAD_BUFFER_SIZE, true))
-                                                {
-                                                    await contentStream.CopyToAsync(fileStream, DOWNLOAD_BUFFER_SIZE, retryToken);
-                                                }
-                                            }
+                                                await CommonHelper.DownloadFileWithRetryAsync(
+                                                    retryClient, packageUrl, vsixPath, retryToken);
                                             if (File.Exists(vsixPath) && new FileInfo(vsixPath).Length > 0 && IsValidZipArchive(vsixPath))
                                             {
                                                 success = TryExtractVSCodeExtensionPackage(vsixPath, extensionsDir, ext);
@@ -2669,6 +2567,10 @@ namespace VSCodePortableInstaller
                                 if (cancellationToken.IsCancellationRequested)
                                     throw;
                                 LogActivity("VSCode: Re-download retry timeout (120s) for " + ext);
+                            }
+                            catch (TimeoutException)
+                            {
+                                throw;
                             }
                             catch (Exception ex)
                             {
@@ -2693,6 +2595,13 @@ namespace VSCodePortableInstaller
                     }
                 }
 
+                var missingExtensions = extensions
+                    .Where(ext => !IsVSCodeExtensionInstalled(extensionsDir, ext))
+                    .ToArray();
+                if (missingExtensions.Length > 0)
+                    throw new InvalidOperationException("VS Code extensions failed to install: " +
+                        string.Join(", ", missingExtensions));
+
                 RemoveVSCodeExtensionsByPrefix(extensionsDir, VSCODE_OPTIONAL_AUTO_INSTALLED_EXTENSIONS);
 
                 LogActivity("VSCode: All extensions processed (" + installed + "/" + total + ")");
@@ -2712,8 +2621,8 @@ namespace VSCodePortableInstaller
             catch (Exception ex)
             {
                 LogActivity("VSCode: Extension installation error -- " + ex.Message);
-                if (ex is OperationCanceledException)
-                    throw;
+                UpdateComponentStatus(componentName, "⚠ " + ex.Message, 0);
+                throw;
             }
         }
 
@@ -2966,11 +2875,8 @@ namespace VSCodePortableInstaller
                 var downloadTasks = extensions.Select(async ext =>
                 {
                     await semaphore.WaitAsync(cancellationToken);
-                    // Per-extension hard timeout. HttpClient.Timeout only covers headers;
-                    // a stalled CDN stream during CopyToAsync would otherwise hang forever.
                     using (var perExtCts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                     {
-                        perExtCts.CancelAfter(TimeSpan.FromSeconds(45));
                         var perExtToken = perExtCts.Token;
                         try
                         {
@@ -2984,13 +2890,20 @@ namespace VSCodePortableInstaller
                             string vsixPath = Path.Combine(tempVsixDir, ext.Replace('.', '_') + ".vsix");
                             LogActivity("VSCode: Downloading VSIX -- " + ext);
 
-                            using (var response = await client.GetAsync(packageUrl, HttpCompletionOption.ResponseHeadersRead, perExtToken))
+                            using (var request = new HttpRequestMessage(HttpMethod.Get, packageUrl))
+                            using (var response = await CommonHelper.SendDownloadRequestAsync(client, request, perExtToken))
                             {
                                 response.EnsureSuccessStatusCode();
                                 using (var contentStream = await response.Content.ReadAsStreamAsync())
                                 using (var fileStream = new FileStream(vsixPath, FileMode.Create, FileAccess.Write, FileShare.None, DOWNLOAD_BUFFER_SIZE, true))
                                 {
-                                    await contentStream.CopyToAsync(fileStream, DOWNLOAD_BUFFER_SIZE, perExtToken);
+                                    var buffer = new byte[DOWNLOAD_BUFFER_SIZE];
+                                    int bytesRead;
+                                    while ((bytesRead = await CommonHelper.ReadDownloadChunkAsync(
+                                        contentStream, buffer, 0, buffer.Length, perExtToken)) > 0)
+                                    {
+                                        await fileStream.WriteAsync(buffer, 0, bytesRead, perExtToken);
+                                    }
                                 }
                             }
 
@@ -3018,6 +2931,10 @@ namespace VSCodePortableInstaller
                             if (cancellationToken.IsCancellationRequested)
                                 throw;
                             LogActivity("VSCode: VSIX download timeout (45s) -- " + ext + " -- will retry later");
+                        }
+                        catch (TimeoutException)
+                        {
+                            throw;
                         }
                         catch (Exception ex)
                         {
@@ -3241,7 +3158,8 @@ namespace VSCodePortableInstaller
         private async Task DownloadFileWithProgress(HttpClient client, string url, string destinationPath,
             string componentName, int startProgress, int endProgress, System.Threading.CancellationToken cancellationToken)
         {
-            using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
+            using (var request = new HttpRequestMessage(HttpMethod.Get, url))
+            using (var response = await CommonHelper.SendDownloadRequestAsync(client, request, cancellationToken))
             {
                 response.EnsureSuccessStatusCode();
 
@@ -3281,7 +3199,8 @@ namespace VSCodePortableInstaller
                         }, progressCancellation.Token);
                     }
 
-                    while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                    while ((bytesRead = await CommonHelper.ReadDownloadChunkAsync(
+                        contentStream, buffer, 0, buffer.Length, cancellationToken)) > 0)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         await fileStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);

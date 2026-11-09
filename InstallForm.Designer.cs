@@ -42,18 +42,18 @@ namespace VSCodePortableInstaller
             this.progressPanel = new System.Windows.Forms.Panel();
             this.componentTable = new System.Windows.Forms.TableLayoutPanel();
             this.fontsNameLabel = new System.Windows.Forms.Label();
-            this.fontsProgressBar = new System.Windows.Forms.ProgressBar();
+            this.fontsProgressBar = new VSCodePortableCommon.CodeNixProgressBar();
             this.fontsStatusLabel = new System.Windows.Forms.Label();
             this.pwshNameLabel = new System.Windows.Forms.Label();
-            this.pwshProgressBar = new System.Windows.Forms.ProgressBar();
+            this.pwshProgressBar = new VSCodePortableCommon.CodeNixProgressBar();
             this.pwshStatusLabel = new System.Windows.Forms.Label();
             this.vscodeNameLabel = new System.Windows.Forms.Label();
-            this.vscodeProgressBar = new System.Windows.Forms.ProgressBar();
+            this.vscodeProgressBar = new VSCodePortableCommon.CodeNixProgressBar();
             this.vscodeStatusLabel = new System.Windows.Forms.Label();
             this.pythonNameLabel = new System.Windows.Forms.Label();
-            this.pythonProgressBar = new System.Windows.Forms.ProgressBar();
+            this.pythonProgressBar = new VSCodePortableCommon.CodeNixProgressBar();
             this.pythonStatusLabel = new System.Windows.Forms.Label();
-            this.overallProgress = new System.Windows.Forms.ProgressBar();
+            this.overallProgress = new VSCodePortableCommon.CodeNixProgressBar();
             this.completedLabel = new System.Windows.Forms.Label();
             this.elapsedTimeLabel = new System.Windows.Forms.Label();
             this.currentTaskLabel = new System.Windows.Forms.Label();
@@ -293,7 +293,6 @@ namespace VSCodePortableInstaller
             this.fontsProgressBar.Location = new System.Drawing.Point(99, 12);
             this.fontsProgressBar.Name = "fontsProgressBar";
             this.fontsProgressBar.Size = new System.Drawing.Size(468, 12);
-            this.fontsProgressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
             //
             // fontsStatusLabel
             //
@@ -325,7 +324,6 @@ namespace VSCodePortableInstaller
             this.pwshProgressBar.Location = new System.Drawing.Point(99, 49);
             this.pwshProgressBar.Name = "pwshProgressBar";
             this.pwshProgressBar.Size = new System.Drawing.Size(468, 12);
-            this.pwshProgressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
             //
             // pwshStatusLabel
             //
@@ -357,7 +355,6 @@ namespace VSCodePortableInstaller
             this.vscodeProgressBar.Location = new System.Drawing.Point(99, 86);
             this.vscodeProgressBar.Name = "vscodeProgressBar";
             this.vscodeProgressBar.Size = new System.Drawing.Size(468, 12);
-            this.vscodeProgressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
             //
             // vscodeStatusLabel
             //
@@ -389,7 +386,6 @@ namespace VSCodePortableInstaller
             this.pythonProgressBar.Location = new System.Drawing.Point(99, 123);
             this.pythonProgressBar.Name = "pythonProgressBar";
             this.pythonProgressBar.Size = new System.Drawing.Size(468, 12);
-            this.pythonProgressBar.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
             //
             // pythonStatusLabel
             //
@@ -408,7 +404,6 @@ namespace VSCodePortableInstaller
             this.overallProgress.Location = new System.Drawing.Point(20, 168);
             this.overallProgress.Name = "overallProgress";
             this.overallProgress.Size = new System.Drawing.Size(680, 8);
-            this.overallProgress.Style = System.Windows.Forms.ProgressBarStyle.Continuous;
             this.overallProgress.TabIndex = 1;
             //
             // completedLabel
@@ -511,18 +506,18 @@ namespace VSCodePortableInstaller
         private System.Windows.Forms.Panel progressPanel;
         private System.Windows.Forms.TableLayoutPanel componentTable;
         private System.Windows.Forms.Label fontsNameLabel;
-        private System.Windows.Forms.ProgressBar fontsProgressBar;
+        private VSCodePortableCommon.CodeNixProgressBar fontsProgressBar;
         private System.Windows.Forms.Label fontsStatusLabel;
         private System.Windows.Forms.Label pwshNameLabel;
-        private System.Windows.Forms.ProgressBar pwshProgressBar;
+        private VSCodePortableCommon.CodeNixProgressBar pwshProgressBar;
         private System.Windows.Forms.Label pwshStatusLabel;
         private System.Windows.Forms.Label vscodeNameLabel;
-        private System.Windows.Forms.ProgressBar vscodeProgressBar;
+        private VSCodePortableCommon.CodeNixProgressBar vscodeProgressBar;
         private System.Windows.Forms.Label vscodeStatusLabel;
         private System.Windows.Forms.Label pythonNameLabel;
-        private System.Windows.Forms.ProgressBar pythonProgressBar;
+        private VSCodePortableCommon.CodeNixProgressBar pythonProgressBar;
         private System.Windows.Forms.Label pythonStatusLabel;
-        private System.Windows.Forms.ProgressBar overallProgress;
+        private VSCodePortableCommon.CodeNixProgressBar overallProgress;
         private System.Windows.Forms.Label completedLabel;
         private System.Windows.Forms.Label elapsedTimeLabel;
         private System.Windows.Forms.Label currentTaskLabel;

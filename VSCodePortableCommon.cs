@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -184,6 +185,8 @@ namespace VSCodePortableCommon
                 RedirectStandardError = true
             };
             ApplyEnvironment(startInfo, baseDir);
+            startInfo.EnvironmentVariables["UV_HTTP_TIMEOUT"] = "30";
+            startInfo.EnvironmentVariables["UV_HTTP_RETRIES"] = "0";
             cancellationToken.ThrowIfCancellationRequested();
             using (var process = Process.Start(startInfo))
             {
@@ -450,6 +453,126 @@ namespace VSCodePortableCommon
         }
     }
 
+    public sealed class CodeNixProgressBar : Control
+    {
+        private int minimum;
+        private int maximum = 100;
+        private int currentValue;
+
+        public CodeNixProgressBar()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+            BackColor = Color.White;
+            TrackColor = Color.FromArgb(224, 232, 241);
+            ProgressColor = CodeNixTheme.Accent;
+            BorderColor = CodeNixTheme.Border;
+            AccessibleRole = AccessibleRole.ProgressBar;
+            TabStop = false;
+        }
+
+        public int Minimum
+        {
+            get { return minimum; }
+            set
+            {
+                minimum = value;
+                if (maximum < minimum)
+                    maximum = minimum;
+                Value = currentValue;
+            }
+        }
+
+        public int Maximum
+        {
+            get { return maximum; }
+            set
+            {
+                maximum = value < minimum ? minimum : value;
+                Value = currentValue;
+            }
+        }
+
+        public int Value
+        {
+            get { return currentValue; }
+            set
+            {
+                int boundedValue = Math.Max(minimum, Math.Min(value, maximum));
+                if (currentValue == boundedValue)
+                    return;
+                currentValue = boundedValue;
+                Invalidate();
+            }
+        }
+
+        public Color TrackColor { get; set; }
+        public Color ProgressColor { get; set; }
+        public Color BorderColor { get; set; }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            Color background = Parent == null ? BackColor : Parent.BackColor;
+            using (var brush = new SolidBrush(background))
+                e.Graphics.FillRectangle(brush, ClientRectangle);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Rectangle bounds = ClientRectangle;
+            if (bounds.Width < 2 || bounds.Height < 2)
+                return;
+
+            bounds.Width--;
+            bounds.Height--;
+            int radius = Math.Min(5, bounds.Height / 2);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+            using (GraphicsPath trackPath = CreateRoundedRectangle(bounds, radius))
+            using (var trackBrush = new SolidBrush(TrackColor))
+            using (var borderPen = new Pen(BorderColor))
+            {
+                e.Graphics.FillPath(trackBrush, trackPath);
+
+                int range = maximum - minimum;
+                double ratio = range == 0 ? 1.0 : (double)(currentValue - minimum) / range;
+                int fillWidth = (int)Math.Round(bounds.Width * ratio);
+                if (fillWidth > 0)
+                {
+                    Rectangle fillBounds = bounds;
+                    fillBounds.Width = Math.Min(fillWidth, bounds.Width);
+                    int fillRadius = Math.Min(radius, Math.Min(fillBounds.Width, fillBounds.Height) / 2);
+                    using (GraphicsPath fillPath = CreateRoundedRectangle(fillBounds, fillRadius))
+                    using (var progressBrush = new SolidBrush(ProgressColor))
+                        e.Graphics.FillPath(progressBrush, fillPath);
+                }
+
+                e.Graphics.DrawPath(borderPen, trackPath);
+            }
+        }
+
+        private static GraphicsPath CreateRoundedRectangle(Rectangle bounds, int radius)
+        {
+            var path = new GraphicsPath();
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+                return path;
+            if (radius <= 0)
+            {
+                path.AddRectangle(bounds);
+                return path;
+            }
+
+            int diameter = radius * 2;
+            path.AddArc(bounds.X, bounds.Y, diameter, diameter, 180, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Y, diameter, diameter, 270, 90);
+            path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+            path.AddArc(bounds.X, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+    }
+
     public static class CodeNixTheme
     {
         public static readonly Color Background = Color.FromArgb(238, 243, 249);
@@ -699,6 +822,55 @@ namespace VSCodePortableCommon
             }
         }
 
+        private static readonly TimeSpan DownloadIdleTimeout = TimeSpan.FromSeconds(30);
+
+        public static async Task<HttpResponseMessage> SendDownloadRequestAsync(
+            HttpClient client,
+            HttpRequestMessage request,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            using (var timeoutSource = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeoutSource.CancelAfter(DownloadIdleTimeout);
+                try
+                {
+                    return await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutSource.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (timeoutSource.IsCancellationRequested)
+                        throw new TimeoutException("No download response was received for 30 seconds.");
+                    throw;
+                }
+            }
+        }
+
+        public static async Task<int> ReadDownloadChunkAsync(
+            Stream input,
+            byte[] buffer,
+            int offset,
+            int count,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            using (var timeoutSource = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                timeoutSource.CancelAfter(DownloadIdleTimeout);
+                try
+                {
+                    return await input.ReadAsync(buffer, offset, count, timeoutSource.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (timeoutSource.IsCancellationRequested)
+                        throw new TimeoutException("No download data was received for 30 seconds.");
+                    throw;
+                }
+            }
+        }
+
         public static async Task DownloadFileWithRetryAsync(
             HttpClient client,
             string url,
@@ -726,7 +898,7 @@ namespace VSCodePortableCommon
                 try
                 {
                     using (var request = new HttpRequestMessage(HttpMethod.Get, url))
-                    using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
+                    using (var response = await SendDownloadRequestAsync(client, request, cancellationToken))
                     {
                         int statusCode = (int)response.StatusCode;
                         if (!response.IsSuccessStatusCode)
@@ -744,7 +916,8 @@ namespace VSCodePortableCommon
                         using (var output = new FileStream(partialPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, buffer.Length, true))
                         {
                             int bytesRead;
-                            while ((bytesRead = await input.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                            while ((bytesRead = await ReadDownloadChunkAsync(
+                                input, buffer, 0, buffer.Length, cancellationToken)) > 0)
                             {
                                 await output.WriteAsync(buffer, 0, bytesRead, cancellationToken);
                                 downloadedBytes += bytesRead;
@@ -1542,6 +1715,10 @@ namespace VSCodePortableCommon
                     downloadSucceeded = true;
                 }
                 catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (TimeoutException)
                 {
                     throw;
                 }

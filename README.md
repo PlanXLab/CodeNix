@@ -148,6 +148,8 @@ A drive prefix such as `D:` starts completion at that drive's root. Without a co
 
 Python filenames entered directly remain unchanged on screen and in history. Python commands use an explicitly activated virtual environment when present, otherwise CodeNix's global environment. The profile does not search for or repair project `.venv` environments. A `#!replx` shebang requires `replx` to be installed in the selected environment.
 
+VS Code discovers a project `.venv` when one exists without configuring it as a required default, so workspaces without `.venv` do not retain a stale interpreter path. Pylance also uses CodeNix's `data\venvs\global\Lib\site-packages` for completion and import analysis. The launcher resolves this path from the current install location on startup, so it remains portable when CodeNix is moved; it does not change runtime imports or the selected interpreter.
+
 ### Navigation
 
 | Command | Description |
