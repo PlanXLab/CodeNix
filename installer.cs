@@ -71,11 +71,9 @@ namespace VSCodePortableInstaller
         private bool installDirectoryWasEmptyAtStart;
         private bool pwsh7Failed;
         private bool criticalFailed;
-        private volatile bool vscodeDownloadCompleted;
         private System.Diagnostics.Stopwatch installTimer;
         private DateTime installStartTime;
         private System.Threading.CancellationTokenSource installCancellationSource;
-        private System.Threading.CancellationTokenSource pythonVersionValidationCancellationSource;
         private Task installationTask;
         private System.Windows.Forms.Timer elapsedTimer;
         private StringBuilder logFileBuffer = new StringBuilder();
@@ -95,10 +93,6 @@ namespace VSCodePortableInstaller
             installStarted = false;
             installationSucceeded = false;
             pwsh7Failed = false;
-
-            // Optimize network performance
-            System.Net.ServicePointManager.DefaultConnectionLimit = 100;
-            System.Net.ServicePointManager.Expect100Continue = false;
 
             InitializeComponent();
             CodeNixTheme.Apply(
@@ -137,7 +131,6 @@ namespace VSCodePortableInstaller
                 }
             }
             catch { /* Ignore icon errors */ }
-
             // Enable dragging from header panel (borderless window)
             headerPanel.MouseDown += HeaderPanel_MouseDown;
             headerTitleLabel.MouseDown += HeaderPanel_MouseDown;
@@ -210,14 +203,13 @@ namespace VSCodePortableInstaller
                 // Center on screen again
                 this.CenterToScreen();
 
-                // Allow immediate redraw so user sees expansion before heavy work
-                Application.DoEvents();
+                this.Invalidate();
+                this.Update();
 
                 isCollapsedOnStart = false;
             }
             catch { /* non-critical */ }
         }
-
         private void BrowseButton_Click(object sender, EventArgs e)
         {
             using (var dialog = new FolderBrowserDialog())
@@ -264,88 +256,6 @@ namespace VSCodePortableInstaller
             pythonHint.ForeColor = System.Drawing.Color.FromArgb(150, 150, 150);
         }
 
-        private async Task<bool> ValidatePythonVersionAvailabilityAsync(string requestedVersion)
-        {
-            if (string.IsNullOrWhiteSpace(requestedVersion))
-                return true;
-
-            string previousHintText = pythonHint.Text;
-            System.Drawing.Color previousHintColor = pythonHint.ForeColor;
-            bool buttonWasEnabled = installButton.Enabled;
-            bool versionBoxWasEnabled = pythonVersionTextBox.Enabled;
-            bool pathBoxWasEnabled = installPathTextBox.Enabled;
-            bool browseButtonWasEnabled = browseButton.Enabled;
-            bool validationSucceeded = false;
-            var validationCancellationSource = new System.Threading.CancellationTokenSource();
-            pythonVersionValidationCancellationSource = validationCancellationSource;
-            string errorMessage = null;
-            string errorTitle = "Python Version Check Failed";
-            MessageBoxIcon errorIcon = MessageBoxIcon.Error;
-
-            try
-            {
-                installButton.Enabled = false;
-                pythonHint.Text = "Checking version...";
-                pythonHint.ForeColor = System.Drawing.Color.FromArgb(80, 110, 135);
-                pythonVersionTextBox.Enabled = false;
-                installPathTextBox.Enabled = false;
-                browseButton.Enabled = false;
-                await PortablePython.ValidatePythonVersionRequestAsync(requestedVersion,
-                    validationCancellationSource.Token);
-                validationSucceeded = true;
-                return !IsDisposed;
-            }
-            catch (OperationCanceledException)
-            {
-                return false;
-            }
-            catch (InvalidOperationException ex)
-            {
-                errorMessage = ex.Message;
-                errorTitle = "Unavailable Python Version";
-                errorIcon = MessageBoxIcon.Warning;
-            }
-            catch (Exception ex)
-            {
-                errorMessage = "Could not verify Python release availability. Check your internet connection and try again.\n\n" + ex.Message;
-            }
-            finally
-            {
-                if (ReferenceEquals(pythonVersionValidationCancellationSource, validationCancellationSource))
-                    pythonVersionValidationCancellationSource = null;
-                validationCancellationSource.Dispose();
-                if (!IsDisposed)
-                {
-                    installButton.Enabled = buttonWasEnabled;
-                    pythonVersionTextBox.Enabled = versionBoxWasEnabled;
-                    installPathTextBox.Enabled = pathBoxWasEnabled;
-                    browseButton.Enabled = browseButtonWasEnabled;
-                    if (validationSucceeded)
-                    {
-                        pythonHint.Text = string.Empty;
-                        pythonHint.ForeColor = System.Drawing.Color.FromArgb(150, 150, 150);
-                    }
-                    else if (errorMessage == null)
-                    {
-                        pythonHint.Text = previousHintText;
-                        pythonHint.ForeColor = previousHintColor;
-                    }
-                }
-            }
-
-            if (IsDisposed)
-                return false;
-
-            pythonHint.Text = errorTitle == "Unavailable Python Version"
-                ? "Unavailable; enter another version."
-                : "Check failed; try again.";
-            pythonHint.ForeColor = System.Drawing.Color.FromArgb(180, 55, 55);
-            MessageBox.Show(this, errorMessage, errorTitle, MessageBoxButtons.OK, errorIcon);
-            pythonVersionTextBox.Focus();
-            pythonVersionTextBox.SelectAll();
-            return false;
-        }
-
         private async void InstallButton_Click(object sender, EventArgs e)
         {
             // If installation completed and no failures, Exit button closes the form
@@ -379,8 +289,6 @@ namespace VSCodePortableInstaller
             if (!ValidateInstallPath(path))
                 return;
             string requestedPythonVersion = pythonVersionTextBox.Text.Trim();
-            if (!await ValidatePythonVersionAvailabilityAsync(requestedPythonVersion))
-                return;
 
             installDirectoryWasEmptyAtStart = IsInstallDirectoryEmpty(path);
             cancelButton.Enabled = true;
@@ -397,7 +305,6 @@ namespace VSCodePortableInstaller
             // Start performance timer
             installTimer = System.Diagnostics.Stopwatch.StartNew();
             installStartTime = DateTime.Now;
-            vscodeDownloadCompleted = false;
             LogActivity("=== Installation started at " + installStartTime.ToString("HH:mm:ss") + " ===");
 
             // Start elapsed time timer (update every second)
@@ -553,7 +460,6 @@ namespace VSCodePortableInstaller
                                 animationTimer.Start();
 
                                 progressDialog.Show(this);
-                                Application.DoEvents();
                             }));
 
                             LogActivity("Waiting for installation tasks to stop...");
@@ -572,7 +478,6 @@ namespace VSCodePortableInstaller
                                     baseMessage = "Terminating processes";
                                     spinnerIndex = 0;
                                 }
-                                Application.DoEvents();
                             }));
 
                             LogActivity("Cleaning up temporary files and installation directory...");
@@ -586,7 +491,6 @@ namespace VSCodePortableInstaller
                                     baseMessage = "Cleanup completed. Exiting";
                                     spinnerIndex = 0;
                                 }
-                                Application.DoEvents();
                             }));
 
                             LogActivity("Cleanup completed. Exiting...");
@@ -763,7 +667,6 @@ namespace VSCodePortableInstaller
                     {
                         label.Text = text;
                     }
-                    Application.DoEvents();
                 }));
             }
             catch
@@ -974,10 +877,6 @@ namespace VSCodePortableInstaller
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (pythonVersionValidationCancellationSource != null &&
-                !pythonVersionValidationCancellationSource.IsCancellationRequested)
-                pythonVersionValidationCancellationSource.Cancel();
-
             // Prevent closing during installation (unless force exit is requested)
             if (installStarted && !installCompleted && e.CloseReason == CloseReason.UserClosing)
             {
@@ -1024,9 +923,11 @@ namespace VSCodePortableInstaller
 
                 // Phase 1A: quick installs first
                 LogActivity("Phase 1A: Installing Fonts and Python...");
+                var fontsTask = Task.Run(() => InstallFonts(cancellationToken));
+                var pythonTask = InstallPythonCoreAsync(cancellationToken, requestedPythonVersion);
                 var phase1Results = await Task.WhenAll(
-                    InstallFontsAsync(cancellationToken),
-                    InstallPythonCoreAsync(cancellationToken, requestedPythonVersion));
+                    fontsTask,
+                    pythonTask);
                 cancellationToken.ThrowIfCancellationRequested();
 
                 // Phase 1B: Installing VSCode and PowerShell 7...
@@ -1595,10 +1496,6 @@ namespace VSCodePortableInstaller
             if (extensionDownloadMatch.Success)
                 return "VS Code: Downloading " + extensionDownloadMatch.Groups[1].Value + " extensions";
 
-            if (normalized.IndexOf("Waiting for VS Code download to finish before starting addons", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "PowerShell 7: Waiting for VS Code core download";
-            if (normalized.IndexOf("Waiting for VS Code download to finish before installing pip", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "Python: Waiting for VS Code core download";
             if (normalized.Equals("Creating codenix.info file...", StringComparison.OrdinalIgnoreCase))
                 return "Finalizing setup metadata";
             if (normalized.Equals("Extracting launcher.exe from embedded resources...", StringComparison.OrdinalIgnoreCase))
@@ -1694,7 +1591,7 @@ namespace VSCodePortableInstaller
         }
 
         // Installation methods
-        private Task<Dictionary<string, string>> InstallFontsAsync(System.Threading.CancellationToken cancellationToken)
+        private Dictionary<string, string> InstallFonts(System.Threading.CancellationToken cancellationToken)
         {
             var versions = new Dictionary<string, string>();
             string componentName = "Fonts";
@@ -1703,7 +1600,7 @@ namespace VSCodePortableInstaller
             if (cancellationToken.IsCancellationRequested)
             {
                 LogActivity("Fonts: Installation cancelled");
-                return Task.FromResult(versions);
+                return versions;
             }
 
             UpdateComponentStatus(componentName, "Installing...", 10);
@@ -1722,7 +1619,7 @@ namespace VSCodePortableInstaller
                     versions["FONTS_VERSION"] = "embedded";
                     UpdateComponentStatus(componentName, "✓ Already installed", 100);
                     LogActivity("Fonts: Already installed");
-                    return Task.FromResult(versions);
+                    return versions;
                 }
 
                 UpdateComponentStatus(componentName, "Extracting fonts...", 30);
@@ -1826,7 +1723,7 @@ namespace VSCodePortableInstaller
                 LogActivity("Fonts: Stack trace: " + ex.StackTrace, true);
             }
 
-            return Task.FromResult(versions);
+            return versions;
         }
 
         // Wrapper methods for new parallel structure
@@ -1940,27 +1837,6 @@ namespace VSCodePortableInstaller
             {
                 LogActivity("PowerShell 7: Addons skipped - pwsh.exe not found");
                 return versions;
-            }
-
-            if (!vscodeDownloadCompleted)
-            {
-                UpdateComponentStatus("PowerShell 7", "Waiting for VSCode download...", 60);
-                LogActivity("PowerShell 7: Waiting for VSCode download to finish before starting addons...");
-
-                int waitIterations = 0;
-                while (!vscodeDownloadCompleted && !cancellationToken.IsCancellationRequested && waitIterations < 360)
-                {
-                    await Task.Delay(500, cancellationToken);
-                    waitIterations++;
-                }
-
-                if (vscodeDownloadCompleted)
-                {
-                    UpdateComponentStatus("PowerShell 7", "Starting addons...", 60);
-                    LogActivity("PowerShell 7: VSCode download finished; starting addons");
-                }
-                else if (!cancellationToken.IsCancellationRequested)
-                    LogActivity("PowerShell 7: VSCode download wait timed out; starting addons anyway");
             }
 
             LogActivity("PowerShell 7: Starting modules and Oh My Posh in parallel...");
@@ -2128,13 +2004,11 @@ namespace VSCodePortableInstaller
 
                 if (!downloadSucceeded)
                 {
-                    vscodeDownloadCompleted = true;
                     LogActivity("VSCode: Download file missing or too small (" + (File.Exists(zipPath) ? new FileInfo(zipPath).Length + " bytes" : "not found") + ")");
                     UpdateComponentStatus(componentName, "⚠ Download failed (file too small)", 0);
                     return versions;
                 }
 
-                vscodeDownloadCompleted = true;
                 LogActivity("VSCode: Download completed (" + (new FileInfo(zipPath).Length / 1048576) + " MB)");
                 UpdateComponentStatus(componentName, "Extracting...", 56);
                 LogActivity("VSCode: Extracting directly to target directory...");
@@ -2163,7 +2037,6 @@ namespace VSCodePortableInstaller
             }
             catch (Exception ex)
             {
-                vscodeDownloadCompleted = true;
                 string errMsg = ex.Message;
                 if (ex.InnerException != null)
                     errMsg += " → " + ex.InnerException.Message;
@@ -2223,6 +2096,7 @@ namespace VSCodePortableInstaller
                 LogActivity("Python: Installing latest stable uv...");
                 string uvVersion = await PortablePython.InstallUvAsync(installDir, null, cancellationToken,
                     message => LogActivity("uv: " + message));
+                versions["UV_VERSION"] = uvVersion;
                 UpdateComponentStatus("Python", "Installing CPython...", 45);
                 string pythonVersion = await PortablePython.InstallPythonAsync(installDir, requestedPythonVersion, cancellationToken,
                     version =>
@@ -2239,7 +2113,6 @@ namespace VSCodePortableInstaller
                 string globalEnvironment = await PortablePython.EnsureGlobalEnvironmentAsync(installDir, pythonVersion,
                     cancellationToken, message => LogActivity("Python: " + message));
                 LogActivity("Python: Global pip environment ready at " + globalEnvironment);
-                versions["UV_VERSION"] = uvVersion;
                 versions["PYTHON_VERSION"] = pythonVersion;
                 Directory.CreateDirectory(Path.Combine(installDir, "projects"));
                 UpdateComponentStatus("Python", "Completed", 100);
@@ -2425,9 +2298,6 @@ namespace VSCodePortableInstaller
                     "KevinRose.vsc-python-indent",
                     "usernamehw.errorlens"
                 };
-
-                // Brief wait for file system to settle after VSCode extraction
-                await Task.Delay(300, cancellationToken);
 
                 int installed = 0;
                 int total = extensions.Count;
@@ -3158,87 +3028,87 @@ namespace VSCodePortableInstaller
         private async Task DownloadFileWithProgress(HttpClient client, string url, string destinationPath,
             string componentName, int startProgress, int endProgress, System.Threading.CancellationToken cancellationToken)
         {
-            using (var request = new HttpRequestMessage(HttpMethod.Get, url))
-            using (var response = await CommonHelper.SendDownloadRequestAsync(client, request, cancellationToken))
+            long totalRead = 0;
+            int lastReportedProgress = startProgress;
+            int lastLoggedPercentage = 0;
+            Task progressTask = null;
+            var progressCancellation = new System.Threading.CancellationTokenSource();
+
+            try
             {
-                response.EnsureSuccessStatusCode();
-
-                var totalBytes = response.Content.Headers.ContentLength;
-                var canReportProgress = totalBytes.HasValue;
-
-                using (var contentStream = await response.Content.ReadAsStreamAsync())
-                using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, DOWNLOAD_BUFFER_SIZE, true))
-                {
-                    var buffer = new byte[DOWNLOAD_BUFFER_SIZE];
-                    long totalRead = 0;
-                    int bytesRead;
-                    var lastReportedProgress = startProgress;
-                    var lastLoggedPercentage = 0;
-
-                    // Progress simulation task for downloads without Content-Length
-                    Task progressTask = null;
-                    var progressCancellation = new System.Threading.CancellationTokenSource();
-
-                    if (!canReportProgress)
+                await CommonHelper.DownloadFileWithRetryAsync(
+                    client,
+                    url,
+                    destinationPath,
+                    cancellationToken,
+                    (downloadedBytes, totalBytes) =>
                     {
-                        progressTask = Task.Run(async () =>
+                        System.Threading.Interlocked.Exchange(ref totalRead, downloadedBytes);
+                        if (totalBytes <= 0)
                         {
-                            int progress = startProgress;
-                            int maxProgress = startProgress + (int)((endProgress - startProgress) * 0.85);
-                            while (!progressCancellation.Token.IsCancellationRequested && progress < maxProgress)
+                            if (progressTask == null)
                             {
-                                await Task.Delay(800); // Faster progress updates
-                                progress += 3;
-                                if (!progressCancellation.Token.IsCancellationRequested && progress < maxProgress)
+                                progressTask = Task.Run(async () =>
                                 {
-                                    var downloadedMB = totalRead / 1048576.0;
-                                    var status = string.Format("Downloading... {0:F1} MB", downloadedMB);
-                                    UpdateComponentStatus(componentName, status, Math.Min(progress, maxProgress));
-                                }
+                                    int progress = startProgress;
+                                    int maxProgress = startProgress + (int)((endProgress - startProgress) * 0.85);
+                                    while (!progressCancellation.Token.IsCancellationRequested && progress < maxProgress)
+                                    {
+                                        try { await Task.Delay(800, progressCancellation.Token); }
+                                        catch (OperationCanceledException) { break; }
+                                        progress += 3;
+                                        if (!progressCancellation.Token.IsCancellationRequested && progress < maxProgress)
+                                        {
+                                            var downloadedMB = System.Threading.Interlocked.Read(ref totalRead) / 1048576.0;
+                                            var status = string.Format("Downloading... {0:F1} MB", downloadedMB);
+                                            UpdateComponentStatus(componentName, status, Math.Min(progress, maxProgress));
+                                        }
+                                    }
+                                });
                             }
-                        }, progressCancellation.Token);
-                    }
-
-                    while ((bytesRead = await CommonHelper.ReadDownloadChunkAsync(
-                        contentStream, buffer, 0, buffer.Length, cancellationToken)) > 0)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        await fileStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);
-                        totalRead += bytesRead;
-
-                        if (canReportProgress)
-                        {
-                            var progressPercentage = (int)((double)totalRead / totalBytes.Value * 100);
-                            var currentProgress = startProgress + (int)((endProgress - startProgress) * (progressPercentage / 100.0));
-
-                            if (currentProgress > lastReportedProgress)
-                            {
-                                var downloadedMB = totalRead / 1048576.0;
-                                var totalMB = totalBytes.Value / 1048576.0;
-                                var status = string.Format("Downloading... {0:F1}/{1:F1} MB", downloadedMB, totalMB);
-                                UpdateComponentStatus(componentName, status, currentProgress);
-
-                                // Log progress at 10% intervals for large downloads (file only - no UI overhead)
-                                if (progressPercentage % 10 == 0 && progressPercentage != lastLoggedPercentage)
-                                {
-                                    LogActivity(string.Format("{0}: Downloading... {1}% ({2:F1}/{3:F1} MB)",
-                                        componentName, progressPercentage, downloadedMB, totalMB), fileOnly: true);
-                                    lastLoggedPercentage = progressPercentage;
-                                }
-
-                                lastReportedProgress = currentProgress;
-                            }
+                            return;
                         }
-                    }
 
-                    // Stop progress simulation
-                    if (progressTask != null)
-                    {
-                        progressCancellation.Cancel();
-                        try { await progressTask; } catch { }
-                    }
-                }
+                        var progressPercentage = (int)((double)downloadedBytes / totalBytes * 100);
+                        var currentProgress = startProgress + (int)((endProgress - startProgress) * (progressPercentage / 100.0));
+                        if (currentProgress <= lastReportedProgress)
+                            return;
+
+                        var knownLengthDownloadedMB = downloadedBytes / 1048576.0;
+                        var totalMB = totalBytes / 1048576.0;
+                        var knownLengthStatus = string.Format("Downloading... {0:F1}/{1:F1} MB", knownLengthDownloadedMB, totalMB);
+                        UpdateComponentStatus(componentName, knownLengthStatus, currentProgress);
+
+                        if (progressPercentage % 10 == 0 && progressPercentage != lastLoggedPercentage)
+                        {
+                            LogActivity(string.Format("{0}: Downloading... {1}% ({2:F1}/{3:F1} MB)",
+                                componentName, progressPercentage, knownLengthDownloadedMB, totalMB), fileOnly: true);
+                            lastLoggedPercentage = progressPercentage;
+                        }
+
+                        lastReportedProgress = currentProgress;
+                    },
+                    1);
             }
+            catch
+            {
+                progressCancellation.Cancel();
+                if (progressTask != null)
+                {
+                    try { progressTask.GetAwaiter().GetResult(); } catch { }
+                    progressCancellation.Dispose();
+                }
+                else
+                    progressCancellation.Dispose();
+                throw;
+            }
+
+            progressCancellation.Cancel();
+            if (progressTask != null)
+            {
+                try { await progressTask; } catch { }
+            }
+            progressCancellation.Dispose();
         }
 
         private Task ExtractZipWithProgress(string zipPath, string extractPath,

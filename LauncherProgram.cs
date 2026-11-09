@@ -29,13 +29,15 @@ namespace VSCodePortableLauncher
         [STAThread]
         static int Main(string[] args)
         {
+            string pvsDir = AppDomain.CurrentDomain.BaseDirectory;
+            Task backgroundMaintenance = null;
+            int exitCode = 0;
             try
             {
                 ServicePointManager.DefaultConnectionLimit = 32;
                 ServicePointManager.Expect100Continue = false;
                 CommonHelper.EnableTls12();
 
-                string pvsDir = AppDomain.CurrentDomain.BaseDirectory;
                 using (var updateMutex = new Mutex(false, GetUpdateMutexName(pvsDir)))
                 {
                     bool lockAcquired;
@@ -70,17 +72,29 @@ namespace VSCodePortableLauncher
 
                         if (args.Contains("--check-versions-internal"))
                         {
-                            var checkErrors = CheckVersionsAsync(pvsDir).GetAwaiter().GetResult();
-                            return checkErrors.Count == 0 ? 0 : 1;
+                            bool checkCompleted;
+                            var checkErrors = CheckVersionsWithMutex(pvsDir, out checkCompleted);
+                            return !checkCompleted || checkErrors.Count == 0 ? 0 : 1;
                         }
 
-                        return RunLauncher(pvsDir);
+                        exitCode = RunLauncher(pvsDir, out backgroundMaintenance);
                     }
                     finally
                     {
                         updateMutex.ReleaseMutex();
                     }
                 }
+
+                if (backgroundMaintenance != null)
+                {
+                    try { backgroundMaintenance.GetAwaiter().GetResult(); }
+                    catch (Exception ex)
+                    {
+                        LogBackgroundMaintenanceIssue(pvsDir, "Background maintenance failed: " + ex.Message);
+                    }
+                }
+
+                return exitCode;
             }
             catch (Exception ex)
             {
@@ -99,6 +113,23 @@ namespace VSCodePortableLauncher
             {
                 byte[] hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(normalizedPath));
                 return "Local\\CodeNix.Update." + BitConverter.ToString(hash).Replace("-", string.Empty);
+            }
+        }
+
+        static string GetMaintenanceMutexName(string pvsDir)
+        {
+            return GetUpdateMutexName(pvsDir).Replace("CodeNix.Update.", "CodeNix.Maintenance.");
+        }
+
+        static bool TryAcquireMutex(Mutex mutex)
+        {
+            try
+            {
+                return mutex.WaitOne(0);
+            }
+            catch (AbandonedMutexException)
+            {
+                return true;
             }
         }
 
@@ -151,72 +182,191 @@ namespace VSCodePortableLauncher
             VSCodeInstaller.RecoverInterruptedPortableUpdate(pvsDir);
         }
 
-        static int RunLauncher(string pvsDir)
+        static int RunLauncher(string pvsDir, out Task backgroundMaintenance)
         {
-            string pvsInfo = Path.Combine(pvsDir, CommonHelper.RuntimeInfoFileName);
-            if (File.Exists(pvsInfo))
+            backgroundMaintenance = null;
+            var pendingUpgrades = new List<string>();
+
+            using (var maintenanceMutex = new Mutex(false, GetMaintenanceMutexName(pvsDir)))
+            {
+                if (TryAcquireMutex(maintenanceMutex))
+                {
+                    try
+                    {
+                        pendingUpgrades = GetPendingUpgradeFlags(pvsDir);
+                        if (pendingUpgrades.Any())
+                        {
+                            Application.EnableVisualStyles();
+                            Application.SetCompatibleTextRenderingDefault(false);
+
+                            var form = new UpgradeForm(pvsDir, pendingUpgrades);
+                            Application.Run(form);
+                        }
+                    }
+                    finally
+                    {
+                        maintenanceMutex.ReleaseMutex();
+                    }
+                }
+            }
+
+            if (!LaunchVSCode(pvsDir))
+                return 1;
+
+            backgroundMaintenance = Task.Run(() => RunBackgroundMaintenance(pvsDir));
+            return 0;
+        }
+
+        static void RunBackgroundMaintenance(string pvsDir)
+        {
+            using (var maintenanceMutex = new Mutex(false, GetMaintenanceMutexName(pvsDir)))
+            {
+                if (!TryAcquireMutex(maintenanceMutex))
+                    return;
+
+                try
+                {
+                    string pvsInfo = Path.Combine(pvsDir, CommonHelper.RuntimeInfoFileName);
+                    if (File.Exists(pvsInfo))
+                    {
+                        try
+                        {
+                            CheckRuntimeMigration(pvsDir, pvsInfo);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogBackgroundMaintenanceIssue(pvsDir, "Could not update portable folder metadata: " + ex.Message);
+                        }
+                    }
+
+                    bool shortcutsReady = false;
+                    try
+                    {
+                        shortcutsReady = ManageShortcutsOnStaThread(pvsDir);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogBackgroundMaintenanceIssue(pvsDir, "Could not refresh shortcuts: " + ex.Message);
+                    }
+
+                    bool fontsReady = false;
+                    try { fontsReady = EnsureFonts(pvsDir); }
+                    catch (Exception ex) { LogBackgroundMaintenanceIssue(pvsDir, "Could not register portable fonts: " + ex.Message); }
+
+                    string settingsError = null;
+                    bool settingsReady = false;
+                    try { settingsReady = EnsurePortableSettings(pvsDir, out settingsError); }
+                    catch (Exception ex) { settingsError = ex.Message; }
+
+                    string powerShellThemeError = null;
+                    bool powerShellThemeReady = false;
+                    try { powerShellThemeReady = EnsurePortablePowerShellTheme(pvsDir, out powerShellThemeError); }
+                    catch (Exception ex) { powerShellThemeError = ex.Message; }
+
+                    if (!shortcutsReady || !fontsReady || !settingsReady || !powerShellThemeReady)
+                    {
+                        var failures = new List<string>();
+                        if (!shortcutsReady)
+                            failures.Add("Desktop or Start Menu shortcut");
+                        if (!fontsReady)
+                            failures.Add("portable fonts");
+                        if (!settingsReady)
+                            failures.Add("portable VS Code settings (" + settingsError + ")");
+                        if (!powerShellThemeReady)
+                            failures.Add("portable PowerShell theme (" + powerShellThemeError + ")");
+                        LogBackgroundMaintenanceIssue(pvsDir, "Could not fully prepare this PC: " + string.Join(", ", failures.ToArray()));
+                    }
+
+                    try
+                    {
+                        PortablePython.RebaseProjectsAsync(pvsDir, message => Debug.WriteLine(message))
+                            .GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogBackgroundMaintenanceIssue(pvsDir, "Could not rebase portable Python environments: " + ex.Message);
+                    }
+
+                    List<string> checkErrors;
+                    try
+                    {
+                        checkErrors = CheckVersionsAsync(pvsDir).GetAwaiter().GetResult();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogBackgroundMaintenanceIssue(pvsDir, "Update check failed: " + ex.Message);
+                        return;
+                    }
+
+                    foreach (string error in checkErrors)
+                        LogBackgroundMaintenanceIssue(pvsDir, "Update check incomplete: " + error);
+                }
+                finally
+                {
+                    maintenanceMutex.ReleaseMutex();
+                }
+            }
+        }
+
+        static bool ManageShortcutsOnStaThread(string pvsDir)
+        {
+            bool shortcutsReady = false;
+            Exception shortcutError = null;
+            var thread = new Thread(() =>
             {
                 try
                 {
-                    CheckRuntimeMigration(pvsDir, pvsInfo);
+                    shortcutsReady = ManageShortcuts(pvsDir);
                 }
-                catch (IOException ex)
+                catch (Exception ex)
                 {
-                    MessageBox.Show("Could not update portable folder metadata: " + ex.Message, "CodeNix warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    shortcutError = ex;
                 }
-                catch (UnauthorizedAccessException ex)
+            });
+            thread.IsBackground = true;
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+
+            if (shortcutError != null)
+                throw shortcutError;
+
+            return shortcutsReady;
+        }
+
+        static List<string> CheckVersionsWithMutex(string pvsDir, out bool checkCompleted)
+        {
+            checkCompleted = false;
+            using (var maintenanceMutex = new Mutex(false, GetMaintenanceMutexName(pvsDir)))
+            {
+                if (!TryAcquireMutex(maintenanceMutex))
+                    return new List<string>();
+
+                try
                 {
-                    MessageBox.Show("Could not update portable folder metadata: " + ex.Message, "CodeNix warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    var errors = CheckVersionsAsync(pvsDir).GetAwaiter().GetResult();
+                    checkCompleted = true;
+                    return errors;
+                }
+                finally
+                {
+                    maintenanceMutex.ReleaseMutex();
                 }
             }
+        }
 
-            bool shortcutsReady = ManageShortcuts(pvsDir);
-            bool fontsReady = EnsureFonts(pvsDir);
-            string settingsError;
-            bool settingsReady = EnsurePortableSettings(pvsDir, out settingsError);
-            string powerShellThemeError;
-            bool powerShellThemeReady = EnsurePortablePowerShellTheme(pvsDir, out powerShellThemeError);
-            if (!shortcutsReady || !fontsReady || !settingsReady || !powerShellThemeReady)
+        static void LogBackgroundMaintenanceIssue(string pvsDir, string message)
+        {
+            try
             {
-                var failures = new List<string>();
-                if (!shortcutsReady)
-                    failures.Add("Desktop or Start Menu shortcut");
-                if (!fontsReady)
-                    failures.Add("portable fonts");
-                if (!settingsReady)
-                    failures.Add("portable VS Code settings (" + settingsError + ")");
-                if (!powerShellThemeReady)
-                    failures.Add("portable PowerShell theme (" + powerShellThemeError + ")");
-                MessageBox.Show(
-                    "CodeNix could not fully prepare this PC: " + string.Join(", ", failures.ToArray()) + ".\r\nVS Code will still be launched.",
-                    "Portable setup warning",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                string logPath = Path.Combine(pvsDir, "codenix.log");
+                string entry = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + message + Environment.NewLine;
+                File.AppendAllText(logPath, entry, Encoding.UTF8);
             }
-
-            var checkErrors = CheckVersionsAsync(pvsDir).GetAwaiter().GetResult();
-            if (checkErrors.Count > 0)
+            catch (Exception ex)
             {
-                MessageBox.Show(
-                    "Some package versions could not be checked. CodeNix will continue with the installed versions.\r\n\r\n" +
-                    string.Join("\r\n", checkErrors.ToArray()),
-                    "Update check incomplete",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                Debug.WriteLine(message + " (log write failed: " + ex.Message + ")");
             }
-
-            var pendingUpgrades = GetPendingUpgradeFlags(pvsDir);
-
-            if (pendingUpgrades.Any())
-            {
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-
-                var form = new UpgradeForm(pvsDir, pendingUpgrades);
-                Application.Run(form);
-            }
-
-            return LaunchVSCode(pvsDir) ? 0 : 1;
         }
 
         static List<string> GetPendingUpgradeFlags(string pvsDir)
@@ -247,9 +397,6 @@ namespace VSCodePortableLauncher
 
         static ProcessStartInfo CreateVSCodeStartInfo(string pvsDir)
         {
-            PortablePython.RebaseProjectsAsync(pvsDir,
-                message => Debug.WriteLine(message)).GetAwaiter().GetResult();
-
             string codeExe = Path.Combine(pvsDir, "Code.exe");
             string extensionsDir = Path.Combine(pvsDir, "data", "extensions");
             string userDataDir = Path.Combine(pvsDir, "data", "user-data");

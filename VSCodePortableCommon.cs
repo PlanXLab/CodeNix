@@ -58,35 +58,6 @@ namespace VSCodePortableCommon
             return Version.TryParse(normalized, out parsed);
         }
 
-        public static async Task ValidatePythonVersionRequestAsync(string requestedVersion,
-            System.Threading.CancellationToken cancellationToken)
-        {
-            if (!IsValidPythonVersionRequest(requestedVersion))
-                throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
-            if (string.IsNullOrWhiteSpace(requestedVersion))
-                return;
-
-            string validationDirectory = Path.Combine(Path.GetTempPath(),
-                "CodeNix-python-validation-" + Guid.NewGuid().ToString("N"));
-            try
-            {
-                await InstallUvAsync(validationDirectory, null, cancellationToken).ConfigureAwait(false);
-                string downloads = await RunAsync(validationDirectory,
-                    "python list --only-downloads --output-format json --no-config cpython@3",
-                    cancellationToken).ConfigureAwait(false);
-                SelectPythonVersion(downloads, requestedVersion.Trim());
-            }
-            finally
-            {
-                try
-                {
-                    if (Directory.Exists(validationDirectory)) Directory.Delete(validationDirectory, true);
-                }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
-            }
-        }
-
         public static string SelectLatestStablePython(string json)
         {
             return SelectPythonVersion(json, null);
@@ -910,6 +881,8 @@ namespace VSCodePortableCommon
                         }
 
                         long? contentLength = response.Content.Headers.ContentLength;
+                        if (reportProgress != null)
+                            reportProgress(0, contentLength.HasValue ? contentLength.Value : 0);
                         long downloadedBytes = 0;
                         byte[] buffer = new byte[262144];
                         using (var input = await response.Content.ReadAsStreamAsync())
@@ -2537,8 +2510,10 @@ namespace VSCodePortableCommon
                         string currentTarget = shortcutObject.TargetPath as string;
                         string currentWorkingDir = shortcutObject.WorkingDirectory as string;
                         string currentIcon = shortcutObject.IconLocation as string;
+                        string currentArguments = shortcutObject.Arguments as string;
                         if (PathsEqual(currentTarget, targetPath) &&
                             PathsEqual(currentWorkingDir, workingDir) &&
+                            string.Equals(currentArguments, arguments ?? string.Empty, StringComparison.Ordinal) &&
                             (string.Equals(currentIcon, iconPath ?? string.Empty, StringComparison.OrdinalIgnoreCase) ||
                              string.Equals(currentIcon, iconPath + ",0", StringComparison.OrdinalIgnoreCase)))
                             return true;
@@ -2551,11 +2526,8 @@ namespace VSCodePortableCommon
                 shortcutObject.TargetPath = targetPath;
                 shortcutObject.WorkingDirectory = workingDir ?? string.Empty;
                 shortcutObject.IconLocation = iconPath ?? string.Empty;
-                if (!shortcutExists)
-                {
-                    shortcutObject.Arguments = arguments ?? string.Empty;
-                    shortcutObject.WindowStyle = 1;
-                }
+                shortcutObject.Arguments = arguments ?? string.Empty;
+                shortcutObject.WindowStyle = 1;
                 shortcutObject.Save();
                 return true;
             }
@@ -2606,9 +2578,29 @@ namespace VSCodePortableCommon
             string startMenu = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
             string shortcutName = "VSCode (Portable)";
 
-            bool desktopReady = CreateOrUpdateShortcut(desktop, shortcutName, launcherPath, iconPath, baseDir);
-            bool startMenuReady = CreateOrUpdateShortcut(startMenu, shortcutName, launcherPath, iconPath, baseDir);
+            bool desktopReady = CreateOrReplaceShortcut(desktop, shortcutName, launcherPath, iconPath, baseDir);
+            bool startMenuReady = CreateOrReplaceShortcut(startMenu, shortcutName, launcherPath, iconPath, baseDir);
             return desktopReady && startMenuReady;
+        }
+
+        public static bool CreateOrReplaceShortcut(string folder, string name, string targetPath,
+            string iconPath, string workingDir, string arguments = "--from-shortcut")
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(name))
+                    return false;
+
+                string shortcutPath = Path.Combine(folder, name + ".lnk");
+                if (File.Exists(shortcutPath))
+                    File.Delete(shortcutPath);
+
+                return CreateOrUpdateShortcut(folder, name, targetPath, iconPath, workingDir, arguments, true);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
     }
 }
