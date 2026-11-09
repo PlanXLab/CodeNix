@@ -54,7 +54,7 @@ Installer UI behavior:
 - Checks package updates and reconciles desktop and Start Menu shortcuts in the background after launch
 - Creates `upgrade_*` flags for updates to be offered the next time the launcher starts
 
-Move the entire installation folder to another PC, then run `launcher.exe`. VS Code starts first when no upgrade flags are pending; CodeNix then refreshes shortcut targets, registers bundled fonts, repairs portable settings, and checks for package updates in the background. Available updates are offered on a later launcher start. VS Code, Python, PowerShell, extensions, modules, and PowerShell command history remain under the portable folder. PowerShell history is stored at `data\user-data\PowerShell\History.txt`. Update-check and setup issues are recorded in `codenix.log` while VS Code continues running.
+Move the entire installation folder to another PC, then run `launcher.exe`. When no upgrade flags are pending, CodeNix applies the portable settings needed for the current run and starts VS Code immediately. It then refreshes shortcut targets, registers bundled fonts, repairs the PowerShell theme, rebases Python project environments, and checks for package updates in the background. Available updates are offered on a later launcher start. VS Code, Python, PowerShell, extensions, modules, and PowerShell command history remain under the portable folder. PowerShell history is stored at `data\user-data\PowerShell\History.txt`. Update-check and setup issues are recorded in `codenix.log` while VS Code continues running.
 
 Upgradeable components:
 

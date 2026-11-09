@@ -189,7 +189,20 @@ namespace VSCodePortableLauncher
 
             using (var maintenanceMutex = new Mutex(false, GetMaintenanceMutexName(pvsDir)))
             {
-                if (TryAcquireMutex(maintenanceMutex))
+                bool maintenanceLockAcquired = TryAcquireMutex(maintenanceMutex);
+                if (!maintenanceLockAcquired && GetPendingUpgradeFlags(pvsDir).Any())
+                {
+                    try
+                    {
+                        maintenanceLockAcquired = maintenanceMutex.WaitOne(TimeSpan.FromSeconds(30));
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        maintenanceLockAcquired = true;
+                    }
+                }
+
+                if (maintenanceLockAcquired)
                 {
                     try
                     {
@@ -209,6 +222,10 @@ namespace VSCodePortableLauncher
                     }
                 }
             }
+
+            string settingsError;
+            if (!EnsurePortableSettings(pvsDir, out settingsError))
+                LogBackgroundMaintenanceIssue(pvsDir, "Could not repair portable VS Code settings: " + settingsError);
 
             if (!LaunchVSCode(pvsDir))
                 return 1;
@@ -253,25 +270,18 @@ namespace VSCodePortableLauncher
                     try { fontsReady = EnsureFonts(pvsDir); }
                     catch (Exception ex) { LogBackgroundMaintenanceIssue(pvsDir, "Could not register portable fonts: " + ex.Message); }
 
-                    string settingsError = null;
-                    bool settingsReady = false;
-                    try { settingsReady = EnsurePortableSettings(pvsDir, out settingsError); }
-                    catch (Exception ex) { settingsError = ex.Message; }
-
                     string powerShellThemeError = null;
                     bool powerShellThemeReady = false;
                     try { powerShellThemeReady = EnsurePortablePowerShellTheme(pvsDir, out powerShellThemeError); }
                     catch (Exception ex) { powerShellThemeError = ex.Message; }
 
-                    if (!shortcutsReady || !fontsReady || !settingsReady || !powerShellThemeReady)
+                    if (!shortcutsReady || !fontsReady || !powerShellThemeReady)
                     {
                         var failures = new List<string>();
                         if (!shortcutsReady)
                             failures.Add("Desktop or Start Menu shortcut");
                         if (!fontsReady)
                             failures.Add("portable fonts");
-                        if (!settingsReady)
-                            failures.Add("portable VS Code settings (" + settingsError + ")");
                         if (!powerShellThemeReady)
                             failures.Add("portable PowerShell theme (" + powerShellThemeError + ")");
                         LogBackgroundMaintenanceIssue(pvsDir, "Could not fully prepare this PC: " + string.Join(", ", failures.ToArray()));
