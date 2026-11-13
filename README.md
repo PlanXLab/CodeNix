@@ -32,7 +32,7 @@ The final distributable is `CodeNix.exe` only. `launcher.exe` is embedded into t
   - `KevinRose.vsc-python-indent`
   - `usernamehw.errorlens`
 
-Oh My Posh is initialized with the bundled theme at `data\lib\pwsh\ohmyposh\themes\tos.omp.json` using its explicit `--config` option.
+Oh My Posh is initialized with the theme downloaded from [PlanXLab/utils](https://github.com/PlanXLab/utils) at `data\lib\pwsh\ohmyposh\themes\tos.omp.json` using its explicit `--config` option. The installer downloads `pip.ps1`, `tos.omp.json`, and `Microsoft.PowerShell_profile.ps1` during PowerShell setup and `settings.json` during VS Code setup; the launcher does not check these files for updates.
 
 `Terminal-Icons` is not installed or updated; the portable profile uses `lsd` for directory listings and icons. Existing `Terminal-Icons` files are left in place and are not imported.
 
@@ -249,7 +249,7 @@ python main.py
 
 In an existing installation, set `"python-envs.terminal.autoActivationType": "command"` and `"python.terminal.activateEnvironment": true` in VS Code's user settings, and remove any workspace overrides that disable activation. Close existing terminals and open a new one for the settings to take effect. CodeNix does not change execution policy automatically; if local policy blocks activation, use `uv run` instead. Project environments are not retargeted when runtimes change; the global pip environment remains tied to the runtime selected when it was created.
 
-For pip-style global installs in a CodeNix PowerShell terminal, use the bundled `pip.ps1` wrapper:
+For pip-style global installs in a CodeNix PowerShell terminal, use the `pip.ps1` wrapper downloaded during installation:
 
 ```powershell
 pip install requests

@@ -46,6 +46,7 @@ namespace VSCodePortableInstaller
         private const string VSCODE_MARKETPLACE_VSIX_URL_TEMPLATE = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{0}/vsextensions/{1}/latest/vspackage";
         private const string VSCODE_MARKETPLACE_VSIX_VERSION_URL_TEMPLATE = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{0}/vsextensions/{1}/{2}/vspackage";
         private const string VSCODE_MARKETPLACE_QUERY_URL = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery";
+        private const string UTILS_RAW_BASE_URL = "https://raw.githubusercontent.com/PlanXLab/utils/main/";
 
         // Paths
         private const string TEMP_INSTALL_DIR = "vscode-pvs-install";
@@ -1936,7 +1937,7 @@ namespace VSCodePortableInstaller
             }
 
             LogActivity("PowerShell 7: pwsh.exe verified successfully");
-            InstallPipWrapper();
+            await InstallPipWrapper(cancellationToken);
             UpdateComponentStatus("PowerShell 7", "Core installed", 60);
 
             return versions;
@@ -2010,11 +2011,11 @@ namespace VSCodePortableInstaller
 
             // STEP 3: Install Oh My Posh theme after Oh My Posh is ready
             UpdateComponentStatus("PowerShell 7", "Installing theme...", 95);
-            await InstallOhMyPoshTheme();
+            await InstallOhMyPoshTheme(cancellationToken);
 
             // STEP 4: Create PowerShell profile
             UpdateComponentStatus("PowerShell 7", "Creating profile...", 98);
-            await CreatePowerShellProfile();
+            await CreatePowerShellProfile(cancellationToken);
 
             // Mark PowerShell 7 as 100% complete
             UpdateComponentStatus("PowerShell 7", "✓ Completed", 100);
@@ -2135,7 +2136,7 @@ namespace VSCodePortableInstaller
                 LogActivity("VSCode: Extraction completed");
                 UpdateComponentStatus(componentName, "Creating settings...", 76);
                 LogActivity("VSCode: Creating settings.json...");
-                await CreateVSCodeSettings();
+                await CreateVSCodeSettings(cancellationToken);
                 LogActivity("VSCode: Settings created");
 
                 UpdateComponentStatus(componentName, "Finalizing...", 79);
@@ -2323,58 +2324,28 @@ namespace VSCodePortableInstaller
             return await installer.InstallModuleAsync(moduleName, versionKey, 30, cancellationToken);
         }
 
-        private async Task InstallOhMyPoshTheme()
+        private async Task InstallOhMyPoshTheme(System.Threading.CancellationToken cancellationToken)
         {
-            try
-            {
-                string pwshOmpDir = Path.Combine(installDir, "data", "lib", "pwsh", "ohmyposh");
-                Directory.CreateDirectory(pwshOmpDir);
-                string themesDir = Path.Combine(pwshOmpDir, "themes");
-                Directory.CreateDirectory(themesDir);
+            string themesDir = Path.Combine(installDir, "data", "lib", "pwsh", "ohmyposh", "themes");
+            string themePath = Path.Combine(themesDir, "tos.omp.json");
+            await DownloadUtilsFileAsync("tos.omp.json", themePath, cancellationToken);
+            CommonHelper.RemoveUtf8BomFromFile(themePath);
 
-                string themeContent = ReadEmbeddedResource("tos.omp.json");
-                if (!string.IsNullOrEmpty(themeContent))
-                {
-                    themeContent = themeContent.TrimStart('\uFEFF');
-                    var utf8WithoutBom = new UTF8Encoding(false);
-                    string themePath = Path.Combine(themesDir, "tos.omp.json");
-                    File.WriteAllText(themePath, themeContent, utf8WithoutBom);
-                    LogActivity("Oh My Posh: Theme installed");
-
-                    string originDir = Path.Combine(installDir, "data", "lib", "origin");
-                    Directory.CreateDirectory(originDir);
-                    string originPath = Path.Combine(originDir, "tos.omp.json");
-                    File.WriteAllText(originPath, themeContent, utf8WithoutBom);
-                }
-            }
-            catch (Exception ex)
-            {
-                LogActivity("Oh My Posh: Theme installation failed - " + ex.Message);
-            }
-
-            await Task.CompletedTask;
+            string originDir = Path.Combine(installDir, "data", "lib", "origin");
+            Directory.CreateDirectory(originDir);
+            File.Copy(themePath, Path.Combine(originDir, "tos.omp.json"), true);
+            LogActivity("Oh My Posh: Theme installed");
         }
 
-        private async Task CreatePowerShellProfile()
+        private async Task CreatePowerShellProfile(System.Threading.CancellationToken cancellationToken)
         {
-            try
-            {
-                string profileContent = ReadEmbeddedResource("Microsoft.PowerShell_profile.ps1");
-                if (profileContent != null)
-                {
-                    // Create actual profile (original)
-                    string profilePath = Path.Combine(installDir, "data", "lib", "pwsh", "Microsoft.PowerShell_profile.ps1");
-                    File.WriteAllText(profilePath, profileContent, Encoding.UTF8);
+            string profilePath = Path.Combine(installDir, "data", "lib", "pwsh", "Microsoft.PowerShell_profile.ps1");
+            await DownloadUtilsFileAsync("Microsoft.PowerShell_profile.ps1", profilePath, cancellationToken);
 
-                    // Create origin backup (copy)
-                    string originDir = Path.Combine(installDir, "data", "lib", "origin");
-                    Directory.CreateDirectory(originDir);
-                    string originPath = Path.Combine(originDir, "Microsoft.PowerShell_profile.ps1");
-                    File.WriteAllText(originPath, profileContent, Encoding.UTF8);
-                }
-                await Task.CompletedTask;
-            }
-            catch { }
+            string originDir = Path.Combine(installDir, "data", "lib", "origin");
+            Directory.CreateDirectory(originDir);
+            File.Copy(profilePath, Path.Combine(originDir, "Microsoft.PowerShell_profile.ps1"), true);
+            LogActivity("PowerShell 7: Profile installed");
         }
 
         private async Task InstallVSCodeExtensions(string componentName, System.Threading.CancellationToken cancellationToken)
@@ -3111,28 +3082,14 @@ namespace VSCodePortableInstaller
             }
         }
 
-        private async Task CreateVSCodeSettings()
+        private async Task CreateVSCodeSettings(System.Threading.CancellationToken cancellationToken)
         {
-            try
-            {
-                string settingsContent = ReadEmbeddedResource("settings.json");
-                if (settingsContent != null)
-                {
-                    // Create actual settings (original)
-                    string settingsDir = Path.Combine(installDir, "data", "user-data", "User");
-                    Directory.CreateDirectory(settingsDir);
-                    string settingsPath = Path.Combine(settingsDir, "settings.json");
-                    File.WriteAllText(settingsPath, settingsContent, Encoding.UTF8);
+            string settingsPath = Path.Combine(installDir, "data", "user-data", "User", "settings.json");
+            await DownloadUtilsFileAsync("settings.json", settingsPath, cancellationToken);
 
-                    // Create origin backup (copy)
-                    string originDir = Path.Combine(installDir, "data", "lib", "origin");
-                    Directory.CreateDirectory(originDir);
-                    string originPath = Path.Combine(originDir, "settings.json");
-                    File.WriteAllText(originPath, settingsContent, Encoding.UTF8);
-                }
-                await Task.CompletedTask;
-            }
-            catch { }
+            string originDir = Path.Combine(installDir, "data", "lib", "origin");
+            Directory.CreateDirectory(originDir);
+            File.Copy(settingsPath, Path.Combine(originDir, "settings.json"), true);
         }
 
         private async Task DownloadFileWithProgress(HttpClient client, string url, string destinationPath,
@@ -3368,31 +3325,28 @@ namespace VSCodePortableInstaller
             }
         }
 
-        private void InstallPipWrapper()
+        private async Task InstallPipWrapper(System.Threading.CancellationToken cancellationToken)
         {
-            string script = ReadEmbeddedResource("pip.ps1");
-            if (script == null)
-                throw new InvalidDataException("The embedded pip.ps1 resource is missing.");
-
             string binDirectory = Path.Combine(installDir, "data", "lib", "pwsh", "bin");
-            Directory.CreateDirectory(binDirectory);
             string scriptPath = Path.Combine(binDirectory, "pip.ps1");
-            File.WriteAllText(scriptPath, script, new UTF8Encoding(false));
+            await DownloadUtilsFileAsync("pip.ps1", scriptPath, cancellationToken);
             LogActivity("PowerShell 7: Installed pip.ps1 at " + scriptPath);
         }
 
-        private string ReadEmbeddedResource(string resourceName)
+        private async Task DownloadUtilsFileAsync(
+            string fileName,
+            string destinationPath,
+            System.Threading.CancellationToken cancellationToken)
         {
-            var assembly = Assembly.GetExecutingAssembly();
-            using (var stream = assembly.GetManifestResourceStream(resourceName))
+            string downloadUrl = UTILS_RAW_BASE_URL + Uri.EscapeDataString(fileName);
+            using (var client = new HttpClient())
             {
-                if (stream == null)
-                    return null;
-                using (var reader = new StreamReader(stream))
-                {
-                    return reader.ReadToEnd();
-                }
+                client.Timeout = TimeSpan.FromMinutes(MAX_DOWNLOAD_TIMEOUT_MINUTES);
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("CodeNix-Installer");
+                await CommonHelper.DownloadFileWithRetryAsync(
+                    client, downloadUrl, destinationPath, cancellationToken).ConfigureAwait(false);
             }
         }
+
     }
 }
