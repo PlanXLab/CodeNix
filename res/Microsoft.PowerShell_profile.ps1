@@ -18,7 +18,7 @@ $PortableData        = "$InstallRoot\data"
 $CacheDir            = "$PortableData\cache\pwsh-init"
 $OmpCacheDir         = "$PortableData\cache\oh-my-posh"
 $env:POSH_CACHE_PATH = $OmpCacheDir
-$env:POSH_THEME      = "$PortableData\lib\pwsh\ohmyposh\themes\tos-therm.omp.json"
+$env:POSH_THEME      = "$PortableData\lib\pwsh\ohmyposh\themes\tos.omp.json"
 $env:BAT_THEME       = 'ansi'
 
 function Add-PortablePath ([string]$Name, [string[]]$Directories) {
@@ -79,7 +79,7 @@ if (-not [System.IO.File]::Exists($UnifiedCacheFile)) {
     }
 
     # Pre-generate Oh My Posh init script
-    $OmpTheme    = "$PortableData\lib\pwsh\ohmyposh\themes\tos-therm.omp.json"
+    $OmpTheme    = "$PortableData\lib\pwsh\ohmyposh\themes\tos.omp.json"
     $OhMyPoshExe = "$Bin\oh-my-posh.exe"
     if ([System.IO.File]::Exists($OhMyPoshExe) -and [System.IO.File]::Exists($OmpTheme)) {
         $themeBytes = [System.IO.File]::ReadAllBytes($OmpTheme)

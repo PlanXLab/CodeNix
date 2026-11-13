@@ -35,7 +35,6 @@
   "workbench.iconTheme": "ayu",
   
   "window.commandCenter": false,
-  "security.workspace.trust.startupPrompt": "once",
   
   "terminal.integrated.mouseWheelZoom": true,
   "terminal.integrated.fontSize": 14,
@@ -87,5 +86,8 @@
   ],
 
   "explorer.confirmDelete": false,
-  "explorer.confirmPasteNative": false
+  "explorer.confirmPasteNative": false,
+
+  "update.mode": "none",
+  "update.showReleaseNotes": false
 }

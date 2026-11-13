@@ -2332,18 +2332,18 @@ namespace VSCodePortableInstaller
                 string themesDir = Path.Combine(pwshOmpDir, "themes");
                 Directory.CreateDirectory(themesDir);
 
-                string themeContent = ReadEmbeddedResource("tos-therm.omp.json");
+                string themeContent = ReadEmbeddedResource("tos.omp.json");
                 if (!string.IsNullOrEmpty(themeContent))
                 {
                     themeContent = themeContent.TrimStart('\uFEFF');
                     var utf8WithoutBom = new UTF8Encoding(false);
-                    string themePath = Path.Combine(themesDir, "tos-therm.omp.json");
+                    string themePath = Path.Combine(themesDir, "tos.omp.json");
                     File.WriteAllText(themePath, themeContent, utf8WithoutBom);
                     LogActivity("Oh My Posh: Theme installed");
 
                     string originDir = Path.Combine(installDir, "data", "lib", "origin");
                     Directory.CreateDirectory(originDir);
-                    string originPath = Path.Combine(originDir, "tos-therm.omp.json");
+                    string originPath = Path.Combine(originDir, "tos.omp.json");
                     File.WriteAllText(originPath, themeContent, utf8WithoutBom);
                 }
             }

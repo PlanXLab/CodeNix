@@ -1,0 +1,269 @@
+{
+  "$schema": "https://githubusercontent.com",
+  "version": 4,
+  "final_space": true,
+  "shell_integration": true,
+  "console_title_template": "{{ if .Root }}[Admin] {{ end }}{{ .Shell }} · {{ .Folder }}",
+  "palette": {
+    "path": "#ABB2BF",
+    "accent": "#61AFEF",
+    "folder": "#E5C07B",
+    "clean": "#98C379",
+    "changed": "#D19A66",
+    "error": "#E06C75",
+    "info": "#56B6C2",
+    "rust": "#DEA584",
+    "cpp": "#C678DD",
+    "muted": "#7F848E",
+    "rail": "#4B5263"
+  },
+  "transient_prompt": {
+    "background": "transparent",
+    "foreground": "p:muted",
+    "foreground_templates": [
+      "{{ if gt .Code 0 }}p:error{{ end }}"
+    ],
+    "template": "❯ ",
+    "newline": false
+  },
+  "secondary_prompt": {
+    "background": "transparent",
+    "foreground": "p:rail",
+    "template": "│ ❯ "
+  },
+  "blocks": [
+    {
+      "type": "prompt",
+      "alignment": "left",
+      "newline": true,
+      "segments": [
+        {
+          "type": "text",
+          "style": "plain",
+          "foreground": "p:accent",
+          "foreground_templates": [
+            "{{ if gt .Code 0 }}p:error{{ end }}"
+          ],
+          "template": "┌─ "
+        },
+        {
+          "type": "os",
+          "style": "plain",
+          "foreground": "p:path",
+          "options": {
+            "windows": "",
+            "macos": "",
+            "linux": "",
+            "ubuntu": "",
+            "debian": "",
+            "raspbian": "",
+            "arch": "",
+            "fedora": ""
+          },
+          "template": "{{ .Icon }}"
+        },
+        {
+          "type": "session",
+          "style": "plain",
+          "foreground": "p:muted",
+          "foreground_templates": [
+            "{{ if .Root }}p:error{{ else if .SSHSession }}p:info{{ end }}"
+          ],
+          "template": "{{ if .Root }}  admin{{ else }} {{ .UserName }}@{{ if gt (len .HostName) 8 }}{{ trunc 7 .HostName }}…{{ else }}{{ .HostName }}{{ end }}{{ end }}"
+        },
+        {
+          "type": "path",
+          "style": "plain",
+          "foreground": "p:path",
+          "options": {
+            "style": "agnoster_short",
+            "max_depth": 3,
+            "folder_icon": "…",
+            "home_icon": "~",
+            "folder_separator_icon": "<p:muted>/</>",
+            "left_format": "<p:muted>%s</>",
+            "right_format": "<p:folder><b>%s</b></>"
+          },
+          "template": " <p:rail>┆</> <p:accent></> {{ .Path }}{{ if eq .OS \"windows\" }}{{ if and (not .Root) (matchP \"(?i)^[a-z]:[/\\\\\\\\](Windows|Program Files( \\\\(x86\\\\))?|ProgramData)([/\\\\\\\\]|$)\" .Location) }} <p:error></>{{ end }}{{ else if not .Writable }} <p:error></>{{ end }}"
+        },
+        {
+          "type": "git",
+          "style": "plain",
+          "min_width": 75,
+          "foreground": "p:clean",
+          "foreground_templates": [
+            "{{ if or (gt .Working.Unmerged 0) (gt .Staging.Unmerged 0) }}p:error{{ else if or .Working.Changed .Staging.Changed }}p:changed{{ else if gt .Behind 0 }}p:info{{ end }}"
+          ],
+          "options": {
+            "fetch_status": true,
+            "fetch_stash_count": true,
+            "fetch_upstream_icon": true,
+            "branch_max_length": 24,
+            "truncate_symbol": "…",
+            "branch_icon": " ",
+            "commit_icon": " ",
+            "tag_icon": " "
+          },
+          "template": " <p:rail>┆</> {{ if .UpstreamIcon }}{{ .UpstreamIcon }} {{ end }}{{ .HEAD }}{{ if .BranchStatus }} {{ .BranchStatus }}{{ end }}{{ if .Staging.Changed }} <p:clean>+{{ .Staging.Added }} ~{{ .Staging.Modified }} -{{ .Staging.Deleted }}</>{{ end }}{{ if .Working.Changed }} <p:changed>~{{ .Working.Modified }} ?{{ .Working.Untracked }}</>{{ end }}{{ if gt .StashCount 0 }} <p:muted> {{ .StashCount }}</>{{ end }}"
+        },
+        {
+          "type": "rust",
+          "style": "plain",
+          "min_width": 85,
+          "foreground": "p:rust",
+          "cache": {
+            "duration": "15m",
+            "strategy": "folder"
+          },
+          "options": {
+            "display_mode": "files",
+            "extensions": [
+              "*.rs",
+              "Cargo.toml",
+              "rust-toolchain.toml"
+            ]
+          },
+          "template": " <p:rail>┆</>  {{ .Full }}"
+        },
+        {
+          "type": "cmake",
+          "style": "plain",
+          "min_width": 90,
+          "foreground": "p:cpp",
+          "cache": {
+            "duration": "15m",
+            "strategy": "folder"
+          },
+          "options": {
+            "display_mode": "files",
+            "extensions": [
+              "CMakeLists.txt",
+              "*.cmake",
+              "Makefile",
+              "meson.build",
+              "*.c",
+              "*.cpp",
+              "*.cc",
+              "*.h",
+              "*.hpp"
+            ]
+          },
+          "template": " <p:rail>┆</>  {{ if .Full }}cmake {{ .Major }}.{{ .Minor }}{{ else }}C/C++{{ end }}"
+        },
+        {
+          "type": "python",
+          "style": "plain",
+          "min_width": 85,
+          "foreground": "p:info",
+          "options": {
+            "display_mode": "context",
+            "fetch_virtual_env": true,
+            "display_default": false,
+            "extensions": [
+              "*.py",
+              "pyproject.toml",
+              "uv.lock",
+              "requirements.txt"
+            ]
+          },
+          "template": " <p:rail>┆</>  {{ if .Venv }}{{ .Venv }}{{ else }}{{ .Major }}.{{ .Minor }}{{ end }}"
+        },
+        {
+          "type": "text",
+          "style": "plain",
+          "foreground": "p:rail",
+          "template": " "
+        }
+      ]
+    },
+    {
+      "type": "prompt",
+      "alignment": "right",
+      "overflow": "hide",
+      "filler": "<p:rail>┄</>",
+      "segments": [
+        {
+          "type": "status",
+          "style": "plain",
+          "min_width": 60,
+          "foreground": "p:error",
+          "options": {
+            "always_enabled": false
+          },
+          "template": "  {{ .Code }} <p:rail>┆</>"
+        },
+        {
+          "type": "executiontime",
+          "style": "plain",
+          "min_width": 60,
+          "foreground": "p:changed",
+          "options": {
+            "always_enabled": false,
+            "style": "austin",
+            "threshold": 500
+          },
+          "template": "  {{ .FormattedMs }} <p:rail>┆</>"
+        },
+        {
+          "type": "time",
+          "style": "plain",
+          "min_width": 50,
+          "foreground": "p:muted",
+          "options": {
+            "time_format": "15:04"
+          },
+          "template": "  {{ .CurrentDate | date .Format }} "
+        },
+        {
+          "type": "text",
+          "style": "plain",
+          "foreground": "p:accent",
+          "foreground_templates": [
+            "{{ if gt .Code 0 }}p:error{{ end }}"
+          ],
+          "template": "─┐"
+        }
+      ]
+    },
+    {
+      "type": "prompt",
+      "alignment": "left",
+      "newline": true,
+      "segments": [
+        {
+          "type": "text",
+          "style": "plain",
+          "foreground": "p:accent",
+          "foreground_templates": [
+            "{{ if gt .Code 0 }}p:error{{ end }}"
+          ],
+          "template": "└─ "
+        },
+        {
+          "type": "text",
+          "style": "plain",
+          "foreground": "p:clean",
+          "foreground_templates": [
+            "{{ if gt .Code 0 }}p:error{{ end }}"
+          ],
+          "template": "󰶻"
+        }
+      ]
+    },
+    {
+      "type": "rprompt",
+      "overflow": "hide",
+      "segments": [
+        {
+          "type": "text",
+          "style": "plain",
+          "foreground": "p:accent",
+          "foreground_templates": [
+            "{{ if gt .Code 0 }}p:error{{ end }}"
+          ],
+          "template": "─┘"
+        }
+      ]
+    }
+  ]
+}

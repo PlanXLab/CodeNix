@@ -617,75 +617,25 @@ namespace VSCodePortableLauncher
             string dataLibDir = Path.Combine(pvsDir, "data", "lib");
             string powerShellDir = Path.Combine(dataLibDir, "pwsh");
             string themesDir = Path.Combine(powerShellDir, "ohmyposh", "themes");
-            string themePath = Path.Combine(themesDir, "tos-therm.omp.json");
+            string themePath = Path.Combine(themesDir, "tos.omp.json");
             string originDir = Path.Combine(dataLibDir, "origin");
+            string originThemePath = Path.Combine(originDir, "tos.omp.json");
 
             try
             {
                 if (!File.Exists(themePath))
                 {
-                    string[] themeSources =
+                    if (!File.Exists(originThemePath))
                     {
-                        Path.Combine(originDir, "tos-therm.omp.json"),
-                        Path.Combine(themesDir, "tos-term.omp.json"),
-                        Path.Combine(originDir, "tos-term.omp.json")
-                    };
-                    string themeSource = themeSources.FirstOrDefault(File.Exists);
-                    if (string.IsNullOrEmpty(themeSource))
-                    {
-                        error = "tos-therm.omp.json and its legacy theme were not found.";
+                        error = "tos.omp.json was not found.";
                         return false;
                     }
 
                     Directory.CreateDirectory(themesDir);
-                    string tempThemePath = themePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                    try
-                    {
-                        File.Copy(themeSource, tempThemePath, false);
-                        if (File.Exists(themePath))
-                            File.Delete(tempThemePath);
-                        else
-                            File.Move(tempThemePath, themePath);
-                    }
-                    finally
-                    {
-                        if (File.Exists(tempThemePath))
-                            File.Delete(tempThemePath);
-                    }
+                    File.Copy(originThemePath, themePath, false);
                 }
 
                 CommonHelper.RemoveUtf8BomFromFile(themePath);
-
-                string[] profilePaths =
-                {
-                    Path.Combine(powerShellDir, "Microsoft.PowerShell_profile.ps1"),
-                    Path.Combine(originDir, "Microsoft.PowerShell_profile.ps1")
-                };
-                foreach (string profilePath in profilePaths)
-                {
-                    if (!File.Exists(profilePath))
-                        continue;
-
-                    string profileContents = File.ReadAllText(profilePath);
-                    string updatedProfile = profileContents.Replace("tos-term.omp.json", "tos-therm.omp.json");
-                    if (string.Equals(profileContents, updatedProfile, StringComparison.Ordinal))
-                        continue;
-
-                    string tempProfilePath = profilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                    try
-                    {
-                        File.WriteAllText(tempProfilePath, updatedProfile, new UTF8Encoding(false));
-                        if (File.Exists(profilePath))
-                            File.Replace(tempProfilePath, profilePath, null);
-                        else
-                            File.Move(tempProfilePath, profilePath);
-                    }
-                    finally
-                    {
-                        if (File.Exists(tempProfilePath))
-                            File.Delete(tempProfilePath);
-                    }
-                }
 
                 return true;
             }
@@ -1370,16 +1320,14 @@ namespace VSCodePortableLauncher
                     Console.WriteLine("  Restored: Microsoft.PowerShell_profile.ps1");
                 }
 
-                // Restore the bundled Oh My Posh theme, falling back to the legacy filename.
-                string originTheme = Path.Combine(originDir, "tos-therm.omp.json");
-                if (!File.Exists(originTheme))
-                    originTheme = Path.Combine(originDir, "tos-term.omp.json");
+                // Restore the bundled Oh My Posh theme.
+                string originTheme = Path.Combine(originDir, "tos.omp.json");
                 if (File.Exists(originTheme))
                 {
-                    string targetTheme = Path.Combine(pvsDir, "data", "lib", "pwsh", "ohmyposh", "themes", "tos-therm.omp.json");
+                    string targetTheme = Path.Combine(pvsDir, "data", "lib", "pwsh", "ohmyposh", "themes", "tos.omp.json");
                     Directory.CreateDirectory(Path.GetDirectoryName(targetTheme));
                     File.Copy(originTheme, targetTheme, true);
-                    Console.WriteLine("  Restored: tos-therm.omp.json");
+                    Console.WriteLine("  Restored: tos.omp.json");
                 }
             }
             catch (Exception ex)

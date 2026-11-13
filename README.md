@@ -32,7 +32,7 @@ The final distributable is `CodeNix.exe` only. `launcher.exe` is embedded into t
   - `KevinRose.vsc-python-indent`
   - `usernamehw.errorlens`
 
-Oh My Posh is initialized with the bundled theme at `data\lib\pwsh\ohmyposh\themes\tos-therm.omp.json` using its explicit `--config` option. The launcher migrates existing `tos-term.omp.json` installations to this filename.
+Oh My Posh is initialized with the bundled theme at `data\lib\pwsh\ohmyposh\themes\tos.omp.json` using its explicit `--config` option.
 
 `Terminal-Icons` is not installed or updated; the portable profile uses `lsd` for directory listings and icons. Existing `Terminal-Icons` files are left in place and are not imported.
 
