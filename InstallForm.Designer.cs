@@ -30,6 +30,7 @@ namespace VSCodePortableInstaller
             this.headerSubLabel = new System.Windows.Forms.Label();
             this.settingsPanel = new System.Windows.Forms.Panel();
             this.pathLabel = new System.Windows.Forms.Label();
+            this.installPathHint = new System.Windows.Forms.Label();
             this.installPathTextBox = new System.Windows.Forms.TextBox();
             this.browseButton = new System.Windows.Forms.Button();
             this.pythonLabel = new System.Windows.Forms.Label();
@@ -41,9 +42,6 @@ namespace VSCodePortableInstaller
             this.separatorPanel = new System.Windows.Forms.Panel();
             this.progressPanel = new System.Windows.Forms.Panel();
             this.componentTable = new System.Windows.Forms.TableLayoutPanel();
-            this.fontsNameLabel = new System.Windows.Forms.Label();
-            this.fontsProgressBar = new VSCodePortableCommon.CodeNixProgressBar();
-            this.fontsStatusLabel = new System.Windows.Forms.Label();
             this.pwshNameLabel = new System.Windows.Forms.Label();
             this.pwshProgressBar = new VSCodePortableCommon.CodeNixProgressBar();
             this.pwshStatusLabel = new System.Windows.Forms.Label();
@@ -99,6 +97,7 @@ namespace VSCodePortableInstaller
             this.settingsPanel.BackColor = System.Drawing.Color.FromArgb(249, 249, 249);
             this.settingsPanel.Controls.Add(this.cancelButton);
             this.settingsPanel.Controls.Add(this.installButton);
+            this.settingsPanel.Controls.Add(this.installPathHint);
             this.settingsPanel.Controls.Add(this.pythonHint);
             this.settingsPanel.Controls.Add(this.pythonVersionTextBox);
             this.settingsPanel.Controls.Add(this.pythonLabel);
@@ -129,6 +128,17 @@ namespace VSCodePortableInstaller
             this.installPathTextBox.Size = new System.Drawing.Size(460, 23);
             this.installPathTextBox.Text = "C:\\VSCode";
             this.installPathTextBox.TabIndex = 0;
+            //
+            // installPathHint
+            //
+            this.installPathHint.AutoEllipsis = true;
+            this.installPathHint.Font = new System.Drawing.Font("Segoe UI", 8F);
+            this.installPathHint.ForeColor = System.Drawing.Color.FromArgb(150, 150, 150);
+            this.installPathHint.Location = new System.Drawing.Point(24, 88);
+            this.installPathHint.Name = "installPathHint";
+            this.installPathHint.Size = new System.Drawing.Size(440, 18);
+            this.installPathHint.Text = "Target folder must not already exist.";
+            this.installPathHint.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             //
             // browseButton
             //
@@ -201,6 +211,7 @@ namespace VSCodePortableInstaller
             this.installButton.Name = "installButton";
             this.installButton.Size = new System.Drawing.Size(110, 34);
             this.installButton.Text = "Install";
+            this.installButton.Enabled = false;
             this.installButton.UseVisualStyleBackColor = false;
             this.installButton.Cursor = System.Windows.Forms.Cursors.Hand;
             this.installButton.TabIndex = 3;
@@ -219,6 +230,7 @@ namespace VSCodePortableInstaller
             this.cancelButton.Name = "cancelButton";
             this.cancelButton.Size = new System.Drawing.Size(100, 34);
             this.cancelButton.Text = "Cancel";
+            this.cancelButton.Enabled = true;
             this.cancelButton.UseVisualStyleBackColor = false;
             this.cancelButton.Cursor = System.Windows.Forms.Cursors.Hand;
             this.cancelButton.TabIndex = 4;
@@ -253,58 +265,23 @@ namespace VSCodePortableInstaller
             this.componentTable.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Absolute, 96F));
             this.componentTable.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100F));
             this.componentTable.ColumnStyles.Add(new System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Absolute, 110F));
-            this.componentTable.Controls.Add(this.fontsNameLabel, 0, 0);
-            this.componentTable.Controls.Add(this.fontsProgressBar, 1, 0);
-            this.componentTable.Controls.Add(this.fontsStatusLabel, 2, 0);
-            this.componentTable.Controls.Add(this.pwshNameLabel, 0, 1);
-            this.componentTable.Controls.Add(this.pwshProgressBar, 1, 1);
-            this.componentTable.Controls.Add(this.pwshStatusLabel, 2, 1);
-            this.componentTable.Controls.Add(this.vscodeNameLabel, 0, 2);
-            this.componentTable.Controls.Add(this.vscodeProgressBar, 1, 2);
-            this.componentTable.Controls.Add(this.vscodeStatusLabel, 2, 2);
-            this.componentTable.Controls.Add(this.pythonNameLabel, 0, 3);
-            this.componentTable.Controls.Add(this.pythonProgressBar, 1, 3);
-            this.componentTable.Controls.Add(this.pythonStatusLabel, 2, 3);
+            this.componentTable.Controls.Add(this.pwshNameLabel, 0, 0);
+            this.componentTable.Controls.Add(this.pwshProgressBar, 1, 0);
+            this.componentTable.Controls.Add(this.pwshStatusLabel, 2, 0);
+            this.componentTable.Controls.Add(this.vscodeNameLabel, 0, 1);
+            this.componentTable.Controls.Add(this.vscodeProgressBar, 1, 1);
+            this.componentTable.Controls.Add(this.vscodeStatusLabel, 2, 1);
+            this.componentTable.Controls.Add(this.pythonNameLabel, 0, 2);
+            this.componentTable.Controls.Add(this.pythonProgressBar, 1, 2);
+            this.componentTable.Controls.Add(this.pythonStatusLabel, 2, 2);
             this.componentTable.Location = new System.Drawing.Point(20, 14);
             this.componentTable.Name = "componentTable";
-            this.componentTable.RowCount = 4;
-            this.componentTable.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 25F));
-            this.componentTable.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 25F));
-            this.componentTable.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 25F));
-            this.componentTable.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 25F));
+            this.componentTable.RowCount = 3;
+            this.componentTable.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 33.333F));
+            this.componentTable.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 33.333F));
+            this.componentTable.RowStyles.Add(new System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 33.334F));
             this.componentTable.Size = new System.Drawing.Size(680, 148);
             this.componentTable.TabIndex = 0;
-            //
-            // fontsNameLabel
-            //
-            this.fontsNameLabel.AutoSize = false;
-            this.fontsNameLabel.Anchor = System.Windows.Forms.AnchorStyles.Left;
-            this.fontsNameLabel.Font = new System.Drawing.Font("Segoe UI", 9F);
-            this.fontsNameLabel.ForeColor = System.Drawing.Color.FromArgb(50, 50, 50);
-            this.fontsNameLabel.Location = new System.Drawing.Point(3, 0);
-            this.fontsNameLabel.Name = "fontsNameLabel";
-            this.fontsNameLabel.Size = new System.Drawing.Size(90, 37);
-            this.fontsNameLabel.Text = "Fonts";
-            this.fontsNameLabel.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
-            //
-            // fontsProgressBar
-            //
-            this.fontsProgressBar.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
-            this.fontsProgressBar.Location = new System.Drawing.Point(99, 12);
-            this.fontsProgressBar.Name = "fontsProgressBar";
-            this.fontsProgressBar.Size = new System.Drawing.Size(468, 12);
-            //
-            // fontsStatusLabel
-            //
-            this.fontsStatusLabel.AutoSize = false;
-            this.fontsStatusLabel.Anchor = System.Windows.Forms.AnchorStyles.Right;
-            this.fontsStatusLabel.Font = new System.Drawing.Font("Segoe UI", 8.5F);
-            this.fontsStatusLabel.ForeColor = System.Drawing.Color.FromArgb(160, 160, 160);
-            this.fontsStatusLabel.Location = new System.Drawing.Point(573, 0);
-            this.fontsStatusLabel.Name = "fontsStatusLabel";
-            this.fontsStatusLabel.Size = new System.Drawing.Size(104, 37);
-            this.fontsStatusLabel.Text = "Waiting";
-            this.fontsStatusLabel.TextAlign = System.Drawing.ContentAlignment.MiddleRight;
             //
             // pwshNameLabel
             //
@@ -312,7 +289,7 @@ namespace VSCodePortableInstaller
             this.pwshNameLabel.Anchor = System.Windows.Forms.AnchorStyles.Left;
             this.pwshNameLabel.Font = new System.Drawing.Font("Segoe UI", 9F);
             this.pwshNameLabel.ForeColor = System.Drawing.Color.FromArgb(50, 50, 50);
-            this.pwshNameLabel.Location = new System.Drawing.Point(3, 37);
+            this.pwshNameLabel.Location = new System.Drawing.Point(3, 0);
             this.pwshNameLabel.Name = "pwshNameLabel";
             this.pwshNameLabel.Size = new System.Drawing.Size(90, 37);
             this.pwshNameLabel.Text = "PowerShell 7";
@@ -321,7 +298,7 @@ namespace VSCodePortableInstaller
             // pwshProgressBar
             //
             this.pwshProgressBar.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
-            this.pwshProgressBar.Location = new System.Drawing.Point(99, 49);
+            this.pwshProgressBar.Location = new System.Drawing.Point(99, 12);
             this.pwshProgressBar.Name = "pwshProgressBar";
             this.pwshProgressBar.Size = new System.Drawing.Size(468, 12);
             //
@@ -331,7 +308,7 @@ namespace VSCodePortableInstaller
             this.pwshStatusLabel.Anchor = System.Windows.Forms.AnchorStyles.Right;
             this.pwshStatusLabel.Font = new System.Drawing.Font("Segoe UI", 8.5F);
             this.pwshStatusLabel.ForeColor = System.Drawing.Color.FromArgb(160, 160, 160);
-            this.pwshStatusLabel.Location = new System.Drawing.Point(573, 37);
+            this.pwshStatusLabel.Location = new System.Drawing.Point(573, 0);
             this.pwshStatusLabel.Name = "pwshStatusLabel";
             this.pwshStatusLabel.Size = new System.Drawing.Size(104, 37);
             this.pwshStatusLabel.Text = "Waiting";
@@ -343,7 +320,7 @@ namespace VSCodePortableInstaller
             this.vscodeNameLabel.Anchor = System.Windows.Forms.AnchorStyles.Left;
             this.vscodeNameLabel.Font = new System.Drawing.Font("Segoe UI", 9F);
             this.vscodeNameLabel.ForeColor = System.Drawing.Color.FromArgb(50, 50, 50);
-            this.vscodeNameLabel.Location = new System.Drawing.Point(3, 74);
+            this.vscodeNameLabel.Location = new System.Drawing.Point(3, 49);
             this.vscodeNameLabel.Name = "vscodeNameLabel";
             this.vscodeNameLabel.Size = new System.Drawing.Size(90, 37);
             this.vscodeNameLabel.Text = "VS Code";
@@ -352,7 +329,7 @@ namespace VSCodePortableInstaller
             // vscodeProgressBar
             //
             this.vscodeProgressBar.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
-            this.vscodeProgressBar.Location = new System.Drawing.Point(99, 86);
+            this.vscodeProgressBar.Location = new System.Drawing.Point(99, 61);
             this.vscodeProgressBar.Name = "vscodeProgressBar";
             this.vscodeProgressBar.Size = new System.Drawing.Size(468, 12);
             //
@@ -362,7 +339,7 @@ namespace VSCodePortableInstaller
             this.vscodeStatusLabel.Anchor = System.Windows.Forms.AnchorStyles.Right;
             this.vscodeStatusLabel.Font = new System.Drawing.Font("Segoe UI", 8.5F);
             this.vscodeStatusLabel.ForeColor = System.Drawing.Color.FromArgb(160, 160, 160);
-            this.vscodeStatusLabel.Location = new System.Drawing.Point(573, 74);
+            this.vscodeStatusLabel.Location = new System.Drawing.Point(573, 49);
             this.vscodeStatusLabel.Name = "vscodeStatusLabel";
             this.vscodeStatusLabel.Size = new System.Drawing.Size(104, 37);
             this.vscodeStatusLabel.Text = "Waiting";
@@ -374,7 +351,7 @@ namespace VSCodePortableInstaller
             this.pythonNameLabel.Anchor = System.Windows.Forms.AnchorStyles.Left;
             this.pythonNameLabel.Font = new System.Drawing.Font("Segoe UI", 9F);
             this.pythonNameLabel.ForeColor = System.Drawing.Color.FromArgb(50, 50, 50);
-            this.pythonNameLabel.Location = new System.Drawing.Point(3, 111);
+            this.pythonNameLabel.Location = new System.Drawing.Point(3, 98);
             this.pythonNameLabel.Name = "pythonNameLabel";
             this.pythonNameLabel.Size = new System.Drawing.Size(90, 37);
             this.pythonNameLabel.Text = "Python";
@@ -383,7 +360,7 @@ namespace VSCodePortableInstaller
             // pythonProgressBar
             //
             this.pythonProgressBar.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
-            this.pythonProgressBar.Location = new System.Drawing.Point(99, 123);
+            this.pythonProgressBar.Location = new System.Drawing.Point(99, 110);
             this.pythonProgressBar.Name = "pythonProgressBar";
             this.pythonProgressBar.Size = new System.Drawing.Size(468, 12);
             //
@@ -393,7 +370,7 @@ namespace VSCodePortableInstaller
             this.pythonStatusLabel.Anchor = System.Windows.Forms.AnchorStyles.Right;
             this.pythonStatusLabel.Font = new System.Drawing.Font("Segoe UI", 8.5F);
             this.pythonStatusLabel.ForeColor = System.Drawing.Color.FromArgb(160, 160, 160);
-            this.pythonStatusLabel.Location = new System.Drawing.Point(573, 111);
+            this.pythonStatusLabel.Location = new System.Drawing.Point(573, 98);
             this.pythonStatusLabel.Name = "pythonStatusLabel";
             this.pythonStatusLabel.Size = new System.Drawing.Size(104, 37);
             this.pythonStatusLabel.Text = "Waiting";
@@ -494,6 +471,7 @@ namespace VSCodePortableInstaller
         private System.Windows.Forms.Label headerSubLabel;
         private System.Windows.Forms.Panel settingsPanel;
         private System.Windows.Forms.Label pathLabel;
+        private System.Windows.Forms.Label installPathHint;
         private System.Windows.Forms.TextBox installPathTextBox;
         private System.Windows.Forms.Button browseButton;
         private System.Windows.Forms.Label pythonLabel;
@@ -505,9 +483,6 @@ namespace VSCodePortableInstaller
         private System.Windows.Forms.Panel separatorPanel;
         private System.Windows.Forms.Panel progressPanel;
         private System.Windows.Forms.TableLayoutPanel componentTable;
-        private System.Windows.Forms.Label fontsNameLabel;
-        private VSCodePortableCommon.CodeNixProgressBar fontsProgressBar;
-        private System.Windows.Forms.Label fontsStatusLabel;
         private System.Windows.Forms.Label pwshNameLabel;
         private VSCodePortableCommon.CodeNixProgressBar pwshProgressBar;
         private System.Windows.Forms.Label pwshStatusLabel;

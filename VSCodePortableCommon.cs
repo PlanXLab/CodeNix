@@ -20,6 +20,19 @@ namespace VSCodePortableCommon
 {
     public static class PortablePython
     {
+        private const string PythonDownloadMetadataUrl =
+            "https://raw.githubusercontent.com/astral-sh/uv/main/crates/uv-python-managed/download-metadata.json";
+        private static readonly object PythonMetadataCacheLock = new object();
+        private static List<PythonReleaseMetadata> cachedStableWindowsPythonReleases;
+        private static DateTime cachedPythonMetadataTime;
+
+        private sealed class PythonReleaseMetadata
+        {
+            public Version Version;
+            public string DownloadUrl;
+            public string Sha256;
+        }
+
         public static string UvPath(string baseDir)
         {
             return Path.Combine(baseDir, "data", "lib", "uv", "uv.exe");
@@ -65,6 +78,11 @@ namespace VSCodePortableCommon
 
         public static string SelectPythonVersion(string json, string requestedVersion)
         {
+            return SelectPythonVersion(GetStablePythonVersions(json), requestedVersion);
+        }
+
+        private static string SelectPythonVersion(List<Version> versions, string requestedVersion)
+        {
             if (!IsValidPythonVersionRequest(requestedVersion))
                 throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
 
@@ -75,9 +93,8 @@ namespace VSCodePortableCommon
             if (normalizedRequest != null && !Version.TryParse(normalizedRequest, out requested))
                 throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
 
-            List<Version> versions = GetStablePythonVersions(json);
             if (versions.Count == 0)
-                throw new InvalidDataException("uv did not provide a stable Windows x64 CPython release.");
+                throw new InvalidDataException("No stable Windows x64 CPython release is available.");
 
             Version selected = null;
             if (requested == null)
@@ -123,49 +140,115 @@ namespace VSCodePortableCommon
         {
             if (!IsValidPythonVersionRequest(requestedVersion))
                 throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
-            if (string.IsNullOrWhiteSpace(requestedVersion))
-                return null;
+            List<PythonReleaseMetadata> releases = await GetStableWindowsPythonReleasesAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return SelectPythonRelease(releases, requestedVersion).Version.ToString();
+        }
 
-            const string releaseUrl = "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest";
-            string releaseJson;
-            using (var client = CreateClient())
-                releaseJson = await CommonHelper.GetStringWithRetryAsync(client, releaseUrl, cancellationToken)
-                    .ConfigureAwait(false);
-
-            var serializer = new JavaScriptSerializer();
-            var release = serializer.Deserialize<Dictionary<string, object>>(releaseJson);
-            object releaseAssets;
-            if (release == null || !release.TryGetValue("assets", out releaseAssets))
-                throw new InvalidDataException("The Python release response did not contain assets.");
-
-            var downloads = new List<Dictionary<string, object>>();
-            foreach (var item in (System.Collections.IEnumerable)releaseAssets)
+        private static PythonReleaseMetadata SelectPythonRelease(List<PythonReleaseMetadata> releases,
+            string requestedVersion)
+        {
+            string selectedVersion = SelectPythonVersion(
+                releases.Select(release => release.Version).ToList(), requestedVersion);
+            foreach (PythonReleaseMetadata release in releases)
             {
-                var asset = item as Dictionary<string, object>;
-                if (asset == null || !asset.ContainsKey("name"))
-                    continue;
-
-                string assetName = Convert.ToString(asset["name"]);
-                var match = Regex.Match(assetName,
-                    @"^cpython-(3\.\d+\.\d+)\+\d+-x86_64-pc-windows-msvc-install_only(?:_stripped)?\.tar\.gz$",
-                    RegexOptions.IgnoreCase);
-                if (!match.Success)
-                    continue;
-
-                downloads.Add(new Dictionary<string, object>
-                {
-                    { "version", match.Groups[1].Value },
-                    { "implementation", "cpython" },
-                    { "os", "windows" },
-                    { "arch", "x86_64" },
-                    { "variant", "default" }
-                });
+                if (release.Version.ToString() == selectedVersion)
+                    return release;
             }
 
-            if (downloads.Count == 0)
-                throw new InvalidDataException("The Python release contains no stable Windows x64 CPython assets.");
+            throw new InvalidDataException("The selected Python release metadata is unavailable.");
+        }
 
-            return SelectPythonVersion(serializer.Serialize(downloads), requestedVersion);
+        private static async Task<List<PythonReleaseMetadata>> GetStableWindowsPythonReleasesAsync(
+            System.Threading.CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (PythonMetadataCacheLock)
+            {
+                if (cachedStableWindowsPythonReleases != null &&
+                    DateTime.UtcNow - cachedPythonMetadataTime < TimeSpan.FromMinutes(5))
+                    return new List<PythonReleaseMetadata>(cachedStableWindowsPythonReleases);
+            }
+
+            string json;
+            using (var client = CreateClient())
+                json = await CommonHelper.GetStringWithRetryAsync(
+                    client, PythonDownloadMetadataUrl, cancellationToken).ConfigureAwait(false);
+
+            var serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = 32 * 1024 * 1024;
+            var metadata = serializer.Deserialize<Dictionary<string, object>>(json);
+            if (metadata == null)
+                throw new InvalidDataException("uv Python download metadata is invalid.");
+
+            var releases = new List<PythonReleaseMetadata>();
+            foreach (var item in metadata)
+            {
+                var release = item.Value as Dictionary<string, object>;
+                if (release == null)
+                    continue;
+
+                object architectureValue;
+                var architecture = release.TryGetValue("arch", out architectureValue)
+                    ? architectureValue as Dictionary<string, object>
+                    : null;
+                object architectureFamily;
+                object name;
+                object operatingSystem;
+                object libc;
+                object prerelease;
+                object downloadUrlValue;
+                object sha256Value;
+                if (architecture == null ||
+                    !architecture.TryGetValue("family", out architectureFamily) ||
+                    !release.TryGetValue("name", out name) ||
+                    !release.TryGetValue("os", out operatingSystem) ||
+                    !release.TryGetValue("libc", out libc) ||
+                    !release.TryGetValue("url", out downloadUrlValue) ||
+                    !release.TryGetValue("sha256", out sha256Value) ||
+                    (release.TryGetValue("prerelease", out prerelease) &&
+                     prerelease != null && !string.IsNullOrWhiteSpace(Convert.ToString(prerelease))) ||
+                    !string.Equals(Convert.ToString(name), "cpython", StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(Convert.ToString(operatingSystem), "windows", StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(Convert.ToString(architectureFamily), "x86_64", StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(Convert.ToString(libc), "none", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                Match versionMatch = Regex.Match(item.Key,
+                    @"^cpython-(3\.\d+\.\d+)-windows-x86_64-none$",
+                    RegexOptions.IgnoreCase);
+                Version version;
+                string downloadUrl = Convert.ToString(downloadUrlValue);
+                string sha256 = Convert.ToString(sha256Value);
+                Uri downloadUri;
+                const string releasePathPrefix =
+                    "/astral-sh/python-build-standalone/releases/download/";
+                if (versionMatch.Success &&
+                    Version.TryParse(versionMatch.Groups[1].Value, out version) &&
+                    Uri.TryCreate(downloadUrl, UriKind.Absolute, out downloadUri) &&
+                    string.Equals(downloadUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(downloadUri.Host, "github.com", StringComparison.OrdinalIgnoreCase) &&
+                    downloadUri.AbsolutePath.StartsWith(releasePathPrefix, StringComparison.OrdinalIgnoreCase) &&
+                    Regex.IsMatch(sha256, @"^[0-9a-fA-F]{64}$"))
+                {
+                    releases.Add(new PythonReleaseMetadata
+                    {
+                        Version = version,
+                        DownloadUrl = downloadUrl,
+                        Sha256 = sha256
+                    });
+                }
+            }
+
+            if (releases.Count == 0)
+                throw new InvalidDataException("uv Python metadata contains no stable Windows x64 CPython releases.");
+
+            lock (PythonMetadataCacheLock)
+            {
+                cachedStableWindowsPythonReleases = releases;
+                cachedPythonMetadataTime = DateTime.UtcNow;
+            }
+            return new List<PythonReleaseMetadata>(releases);
         }
 
         private static List<Version> GetStablePythonVersions(string json)
@@ -193,7 +276,8 @@ namespace VSCodePortableCommon
         }
 
         public static async Task<string> RunAsync(string baseDir, string arguments,
-            System.Threading.CancellationToken cancellationToken, Action<string> logActivity = null)
+            System.Threading.CancellationToken cancellationToken, Action<string> logActivity = null,
+            IDictionary<string, string> environmentOverrides = null)
         {
             var startInfo = new ProcessStartInfo
             {
@@ -206,13 +290,18 @@ namespace VSCodePortableCommon
                 RedirectStandardError = true
             };
             ApplyEnvironment(startInfo, baseDir);
+            if (environmentOverrides != null)
+            {
+                foreach (KeyValuePair<string, string> variable in environmentOverrides)
+                    startInfo.EnvironmentVariables[variable.Key] = variable.Value;
+            }
             startInfo.EnvironmentVariables["UV_HTTP_TIMEOUT"] = "30";
             startInfo.EnvironmentVariables["UV_HTTP_RETRIES"] = "1";
             cancellationToken.ThrowIfCancellationRequested();
             using (var process = Process.Start(startInfo))
             {
                 var output = process.StandardOutput.ReadToEndAsync();
-                var error = process.StandardError.ReadToEndAsync();
+                var error = ReadStandardErrorAsync(process.StandardError, logActivity);
                 var exited = Task.Run(() => process.WaitForExit());
                 using (cancellationToken.Register(() =>
                 {
@@ -220,25 +309,41 @@ namespace VSCodePortableCommon
                     catch (InvalidOperationException) { }
                 }))
                 {
-                    if (await Task.WhenAny(exited, Task.Delay(TimeSpan.FromMinutes(10), cancellationToken)).ConfigureAwait(false) != exited)
+                    bool timedOut = await Task.WhenAny(
+                        exited,
+                        Task.Delay(TimeSpan.FromMinutes(10), cancellationToken)).ConfigureAwait(false) != exited;
+                    if (timedOut)
                     {
                         try { if (!process.HasExited) process.Kill(); }
                         catch (InvalidOperationException) { }
-                        await exited.ConfigureAwait(false);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        throw new TimeoutException("uv command timed out: " + arguments);
                     }
+
                     await exited.ConfigureAwait(false);
                     string standardOutput = await output.ConfigureAwait(false);
                     string standardError = await error.ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
-                    if (logActivity != null && !string.IsNullOrWhiteSpace(standardError))
-                        logActivity(standardError.Trim());
+                    if (timedOut)
+                        throw new TimeoutException("uv command timed out: " + arguments);
                     if (process.ExitCode != 0)
                         throw new InvalidOperationException("uv failed: " + standardError.Trim());
                     return standardOutput.Trim();
                 }
             }
+        }
+
+        private static async Task<string> ReadStandardErrorAsync(
+            StreamReader reader,
+            Action<string> logActivity)
+        {
+            var output = new StringBuilder();
+            string line;
+            while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) != null)
+            {
+                output.AppendLine(line);
+                if (logActivity != null && !string.IsNullOrWhiteSpace(line))
+                    logActivity(line.Trim());
+            }
+            return output.ToString();
         }
 
         private static HttpClient CreateClient()
@@ -335,15 +440,81 @@ namespace VSCodePortableCommon
 
         public static async Task<string> InstallPythonAsync(string baseDir, string requestedVersion,
             System.Threading.CancellationToken cancellationToken, Action<string> selectedVersion,
-            Action<string> logActivity = null)
+            Action<string> logActivity = null, Action<int> downloadProgress = null)
         {
-            string downloads = await RunAsync(baseDir,
-                "python list --only-downloads --output-format json --no-config cpython@3", cancellationToken).ConfigureAwait(false);
-            string version = SelectPythonVersion(downloads, requestedVersion);
+            if (!IsValidPythonVersionRequest(requestedVersion))
+                throw new ArgumentException("Enter a Python version in x.y or x.y.z format.", "requestedVersion");
+            List<PythonReleaseMetadata> releases = await GetStableWindowsPythonReleasesAsync(cancellationToken)
+                .ConfigureAwait(false);
+            PythonReleaseMetadata selectedRelease = SelectPythonRelease(releases, requestedVersion);
+            string version = selectedRelease.Version.ToString();
             if (selectedVersion != null) selectedVersion(version);
+
+            string mirrorRoot = Path.Combine(baseDir, "data", "cache", "python-mirror");
+            string archivePath = GetPythonMirrorArchivePath(mirrorRoot, selectedRelease.DownloadUrl);
+            Directory.CreateDirectory(Path.GetDirectoryName(archivePath));
+            if (!File.Exists(archivePath) || !VerifySha256(archivePath, selectedRelease.Sha256))
+            {
+                if (File.Exists(archivePath))
+                    File.Delete(archivePath);
+                string partialMetadataPath = archivePath + ".aria2";
+                if (File.Exists(partialMetadataPath))
+                    File.Delete(partialMetadataPath);
+                await Aria2Downloader.DownloadFileAsync(baseDir, selectedRelease.DownloadUrl,
+                    archivePath, "Python", cancellationToken, downloadProgress, selectedRelease.Sha256)
+                    .ConfigureAwait(false);
+            }
+            else if (logActivity != null)
+            {
+                logActivity("Using verified cached CPython archive.");
+            }
+
+            if (!VerifySha256(archivePath, selectedRelease.Sha256))
+                throw new InvalidDataException("The CPython archive SHA256 verification failed.");
+
+            var environment = new Dictionary<string, string>
+            {
+                { "UV_PYTHON_INSTALL_MIRROR", new Uri(Path.GetFullPath(mirrorRoot) + Path.DirectorySeparatorChar).AbsoluteUri }
+            };
             await RunAsync(baseDir, "python install cpython-" + version +
-                "-windows-x86_64-none --no-config --no-bin --no-registry", cancellationToken, logActivity).ConfigureAwait(false);
+                "-windows-x86_64-none --no-config --no-bin --no-registry", cancellationToken, logActivity,
+                environment).ConfigureAwait(false);
             return version;
+        }
+
+        private static string GetPythonMirrorArchivePath(string mirrorRoot, string downloadUrl)
+        {
+            Uri downloadUri = new Uri(downloadUrl);
+            const string releasePathPrefix =
+                "/astral-sh/python-build-standalone/releases/download/";
+            string relativePath = Uri.UnescapeDataString(
+                downloadUri.AbsolutePath.Substring(releasePathPrefix.Length));
+            string[] segments = relativePath.Split('/');
+            if (segments.Length < 2 || segments.Any(segment =>
+                string.IsNullOrWhiteSpace(segment) || segment == "." || segment == ".." ||
+                segment.IndexOf(':') >= 0))
+                throw new InvalidDataException("The CPython download path in uv metadata is invalid.");
+
+            string normalizedRelativePath = relativePath.Replace('/', Path.DirectorySeparatorChar);
+            string root = Path.GetFullPath(mirrorRoot).TrimEnd(Path.DirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+            string archivePath = Path.GetFullPath(Path.Combine(root, normalizedRelativePath));
+            if (!archivePath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The CPython download path resolves outside the local mirror.");
+            return archivePath;
+        }
+
+        private static bool VerifySha256(string path, string expectedHash)
+        {
+            if (!File.Exists(path) || !Regex.IsMatch(expectedHash ?? string.Empty, @"^[0-9a-fA-F]{64}$"))
+                return false;
+            using (var stream = File.OpenRead(path))
+            using (var sha256 = SHA256.Create())
+            {
+                string actualHash = BitConverter.ToString(sha256.ComputeHash(stream))
+                    .Replace("-", "").ToLowerInvariant();
+                return string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase);
+            }
         }
 
         public static async Task<string> EnsureGlobalEnvironmentAsync(string baseDir, string pythonVersion,
@@ -481,6 +652,9 @@ namespace VSCodePortableCommon
         private int minimum;
         private int maximum = 100;
         private int currentValue;
+        private readonly System.Windows.Forms.Timer marqueeTimer;
+        private int marqueeOffset;
+        private bool isIndeterminate;
 
         public CodeNixProgressBar()
         {
@@ -492,6 +666,15 @@ namespace VSCodePortableCommon
             BorderColor = CodeNixTheme.Border;
             AccessibleRole = AccessibleRole.ProgressBar;
             TabStop = false;
+            marqueeTimer = new System.Windows.Forms.Timer();
+            marqueeTimer.Interval = 35;
+            marqueeTimer.Tick += (sender, args) =>
+            {
+                int segmentWidth = Math.Max(24, Width / 4);
+                int cycleLength = Math.Max(1, Width + segmentWidth);
+                marqueeOffset = (marqueeOffset + 8) % cycleLength;
+                Invalidate();
+            };
         }
 
         public int Minimum
@@ -529,9 +712,39 @@ namespace VSCodePortableCommon
             }
         }
 
+        public bool IsIndeterminate
+        {
+            get { return isIndeterminate; }
+            set
+            {
+                if (isIndeterminate == value)
+                    return;
+                isIndeterminate = value;
+                marqueeOffset = 0;
+                UpdateMarqueeTimer();
+                Invalidate();
+            }
+        }
+
         public Color TrackColor { get; set; }
         public Color ProgressColor { get; set; }
         public Color BorderColor { get; set; }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            UpdateMarqueeTimer();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                marqueeTimer.Stop();
+                marqueeTimer.Dispose();
+            }
+            base.Dispose(disposing);
+        }
 
         protected override void OnPaintBackground(PaintEventArgs e)
         {
@@ -558,21 +771,46 @@ namespace VSCodePortableCommon
             {
                 e.Graphics.FillPath(trackBrush, trackPath);
 
-                int range = maximum - minimum;
-                double ratio = range == 0 ? 1.0 : (double)(currentValue - minimum) / range;
-                int fillWidth = (int)Math.Round(bounds.Width * ratio);
-                if (fillWidth > 0)
+                if (isIndeterminate)
                 {
-                    Rectangle fillBounds = bounds;
-                    fillBounds.Width = Math.Min(fillWidth, bounds.Width);
-                    int fillRadius = Math.Min(radius, Math.Min(fillBounds.Width, fillBounds.Height) / 2);
-                    using (GraphicsPath fillPath = CreateRoundedRectangle(fillBounds, fillRadius))
+                    int segmentWidth = Math.Min(bounds.Width, Math.Max(24, bounds.Width / 4));
+                    int segmentX = bounds.X + marqueeOffset - segmentWidth;
+                    var state = e.Graphics.Save();
+                    e.Graphics.SetClip(trackPath);
+                    Rectangle segmentBounds = new Rectangle(segmentX, bounds.Y, segmentWidth, bounds.Height);
+                    using (GraphicsPath fillPath = CreateRoundedRectangle(segmentBounds, Math.Min(radius, segmentWidth / 2)))
                     using (var progressBrush = new SolidBrush(ProgressColor))
                         e.Graphics.FillPath(progressBrush, fillPath);
+                    e.Graphics.Restore(state);
+                }
+                else
+                {
+                    int range = maximum - minimum;
+                    double ratio = range == 0 ? 1.0 : (double)(currentValue - minimum) / range;
+                    int fillWidth = (int)Math.Round(bounds.Width * ratio);
+                    if (fillWidth > 0)
+                    {
+                        Rectangle fillBounds = bounds;
+                        fillBounds.Width = Math.Min(fillWidth, bounds.Width);
+                        int fillRadius = Math.Min(radius, Math.Min(fillBounds.Width, fillBounds.Height) / 2);
+                        using (GraphicsPath fillPath = CreateRoundedRectangle(fillBounds, fillRadius))
+                        using (var progressBrush = new SolidBrush(ProgressColor))
+                            e.Graphics.FillPath(progressBrush, fillPath);
+                    }
                 }
 
                 e.Graphics.DrawPath(borderPen, trackPath);
             }
+        }
+
+        private void UpdateMarqueeTimer()
+        {
+            if (marqueeTimer == null)
+                return;
+            if (isIndeterminate && Visible && !IsDisposed)
+                marqueeTimer.Start();
+            else
+                marqueeTimer.Stop();
         }
 
         private static GraphicsPath CreateRoundedRectangle(Rectangle bounds, int radius)
@@ -695,6 +933,20 @@ namespace VSCodePortableCommon
             button.Font = BodyFont;
             button.UseVisualStyleBackColor = false;
             button.Cursor = Cursors.Hand;
+        }
+
+        public static void StyleDisabledButton(Button button)
+        {
+            button.BackColor = Color.White;
+            button.ForeColor = TextTertiary;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 1;
+            button.FlatAppearance.BorderColor = Border;
+            button.FlatAppearance.MouseOverBackColor = Color.White;
+            button.FlatAppearance.MouseDownBackColor = Color.White;
+            button.Font = ButtonFont;
+            button.UseVisualStyleBackColor = false;
+            button.Cursor = Cursors.Default;
         }
 
         public static void StyleBusyButton(Button button, string text)
@@ -1386,6 +1638,327 @@ namespace VSCodePortableCommon
         }
     }
 
+    public static class Aria2Downloader
+    {
+        private const string LatestReleaseApiUrl = "https://api.github.com/repos/aria2/aria2/releases/latest";
+
+        public static string RuntimeExecutablePath(string baseDir)
+        {
+            return Path.Combine(baseDir, "data", "lib", "aria2", "aria2c.exe");
+        }
+
+        public static async Task EnsureInstalledAsync(string baseDir,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            string binDirectory = Path.Combine(baseDir, "data", "lib", "pwsh", "bin");
+            string binExecutable = Path.Combine(binDirectory, "aria2c.exe");
+            string runtimeDirectory = Path.GetDirectoryName(RuntimeExecutablePath(baseDir));
+            string runtimeExecutable = RuntimeExecutablePath(baseDir);
+
+            if (File.Exists(runtimeExecutable))
+            {
+                try
+                {
+                    await ValidateExecutableAsync(runtimeExecutable, cancellationToken).ConfigureAwait(false);
+                    CommonHelper.CopyDirectoryRecursive(runtimeDirectory, binDirectory);
+                    return;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.TraceWarning(
+                        "Existing downloader runtime is invalid; reinstalling. " + ex.Message);
+                }
+            }
+
+            if (File.Exists(binExecutable))
+            {
+                try
+                {
+                    await ValidateExecutableAsync(binExecutable, cancellationToken).ConfigureAwait(false);
+                    Directory.CreateDirectory(runtimeDirectory);
+                    CommonHelper.CopyDirectoryRecursive(binDirectory, runtimeDirectory);
+                    await ValidateExecutableAsync(runtimeExecutable, cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Trace.TraceWarning(
+                        "Existing downloader installation is invalid; reinstalling. " + ex.Message);
+                }
+            }
+
+            string libraryDirectory = Path.Combine(baseDir, "data", "lib");
+            string stagingDirectory = Path.Combine(libraryDirectory,
+                ".aria2-stage-" + Guid.NewGuid().ToString("N"));
+            string archivePath = Path.Combine(Path.GetTempPath(),
+                "codenix-aria2-" + Guid.NewGuid().ToString("N") + ".zip");
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                CommonHelper.EnableTls12();
+                Directory.CreateDirectory(libraryDirectory);
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromMinutes(10);
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("CodeNix/2.0");
+                    string json = await CommonHelper.GetStringWithRetryAsync(
+                        client, LatestReleaseApiUrl, cancellationToken).ConfigureAwait(false);
+                    var release = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+                    if (release == null || Convert.ToBoolean(release["prerelease"]))
+                        throw new InvalidDataException("The latest download accelerator release is invalid or unstable.");
+
+                    string tag = Convert.ToString(release["tag_name"]);
+                    Match releaseMatch = Regex.Match(tag, @"^release-(\d+\.\d+\.\d+)$");
+                    if (!releaseMatch.Success)
+                        throw new InvalidDataException("The download accelerator release tag is invalid: " + tag);
+
+                    Dictionary<string, object> asset = null;
+                    foreach (var candidate in (System.Collections.IEnumerable)release["assets"])
+                    {
+                        var metadata = candidate as Dictionary<string, object>;
+                        if (metadata == null)
+                            continue;
+                        Match assetMatch = Regex.Match(Convert.ToString(metadata["name"]),
+                            @"^aria2-(\d+\.\d+\.\d+)-win-64bit-build\d+\.zip$");
+                        if (assetMatch.Success && assetMatch.Groups[1].Value == releaseMatch.Groups[1].Value)
+                        {
+                            asset = metadata;
+                            break;
+                        }
+                    }
+                    if (asset == null || !asset.ContainsKey("browser_download_url"))
+                        throw new InvalidDataException("The Windows x64 download accelerator archive is missing.");
+
+                    string downloadUrl = Convert.ToString(asset["browser_download_url"]);
+                    object digestValue;
+                    string expectedDigest = asset.TryGetValue("digest", out digestValue)
+                        ? Convert.ToString(digestValue)
+                        : string.Empty;
+                    await CommonHelper.DownloadFileWithRetryAsync(
+                        client, downloadUrl, archivePath, cancellationToken).ConfigureAwait(false);
+
+                    if (!string.IsNullOrWhiteSpace(expectedDigest))
+                    {
+                        Match digestMatch = Regex.Match(expectedDigest, @"^sha256:([0-9a-fA-F]{64})$");
+                        if (!digestMatch.Success ||
+                            !VerifySha256(archivePath, digestMatch.Groups[1].Value))
+                            throw new InvalidDataException("The download accelerator archive SHA256 verification failed.");
+                    }
+                }
+
+                await CommonHelper.ExtractZipWithProgressAsync(
+                    archivePath, stagingDirectory, "download tools", 0, 100, progress => { }, message => { },
+                    cancellationToken)
+                    .ConfigureAwait(false);
+                string[] executables = Directory.GetFiles(stagingDirectory, "aria2c.exe", SearchOption.AllDirectories);
+                if (executables.Length != 1 || new FileInfo(executables[0]).Length == 0)
+                    throw new InvalidDataException("The download accelerator archive is invalid.");
+
+                await ValidateExecutableAsync(executables[0], cancellationToken).ConfigureAwait(false);
+                Directory.CreateDirectory(binDirectory);
+                CommonHelper.CopyDirectoryRecursive(Path.GetDirectoryName(executables[0]), binDirectory);
+                Directory.CreateDirectory(runtimeDirectory);
+                CommonHelper.CopyDirectoryRecursive(binDirectory, runtimeDirectory);
+                await ValidateExecutableAsync(runtimeExecutable, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                DeleteTemporaryFile(archivePath);
+                DeleteTemporaryDirectory(stagingDirectory);
+            }
+        }
+
+        public static async Task DownloadFileAsync(string baseDir, string url, string destinationPath,
+            string componentName, System.Threading.CancellationToken cancellationToken,
+            Action<int> reportProgress = null, string sha256 = null)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                throw new ArgumentException("A download URL is required.", "url");
+            if (!string.IsNullOrWhiteSpace(sha256) && !Regex.IsMatch(sha256, @"^[0-9a-fA-F]{64}$"))
+                throw new ArgumentException("A valid SHA256 digest is required.", "sha256");
+
+            string executable = RuntimeExecutablePath(baseDir);
+            if (!File.Exists(executable))
+                throw new FileNotFoundException("The download accelerator is unavailable.", executable);
+            string destinationDirectory = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrEmpty(destinationDirectory))
+                Directory.CreateDirectory(destinationDirectory);
+            if (File.Exists(destinationPath))
+                File.Delete(destinationPath);
+            if (File.Exists(destinationPath + ".aria2"))
+                File.Delete(destinationPath + ".aria2");
+
+            var arguments = new StringBuilder();
+            arguments.Append("-x 16 -s 16 -k 1M --min-split-size=1M");
+            arguments.Append(" --summary-interval=1 --show-console-readout=true --console-log-level=notice");
+            arguments.Append(" --max-tries=3 --retry-wait=2 --timeout=30 --connect-timeout=30");
+            arguments.Append(" --continue=true --allow-overwrite=true --auto-file-renaming=false");
+            if (!string.IsNullOrWhiteSpace(sha256))
+                arguments.Append(" --checksum=sha-256=").Append(sha256);
+            arguments.Append(" --dir=").Append(QuoteProcessArgument(destinationDirectory));
+            arguments.Append(" --out=").Append(QuoteProcessArgument(Path.GetFileName(destinationPath)));
+            arguments.Append(" ").Append(QuoteProcessArgument(url));
+
+            int lastProgress = 0;
+            await RunProcessAsync(executable, arguments.ToString(), cancellationToken,
+                TimeSpan.FromMinutes(30), line =>
+                {
+                    if (reportProgress == null)
+                        return;
+                    Match progressMatch = Regex.Match(line, @"\((\d{1,3})%\)");
+                    int progress;
+                    if (progressMatch.Success && int.TryParse(progressMatch.Groups[1].Value, out progress))
+                    {
+                        progress = Math.Min(99, progress);
+                        if (progress > lastProgress)
+                        {
+                            lastProgress = progress;
+                            reportProgress(progress);
+                        }
+                    }
+                }).ConfigureAwait(false);
+
+            if (!File.Exists(destinationPath) || new FileInfo(destinationPath).Length == 0)
+                throw new InvalidDataException(componentName + " download returned an empty file.");
+            if (reportProgress != null)
+                reportProgress(100);
+        }
+
+        private static async Task<string> ValidateExecutableAsync(string executable,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (!File.Exists(executable) || new FileInfo(executable).Length == 0)
+                throw new InvalidDataException("The downloader executable is missing or empty.");
+            string output = await RunProcessAsync(executable, "--version", cancellationToken,
+                TimeSpan.FromSeconds(15), null).ConfigureAwait(false);
+            Match match = Regex.Match(output, @"aria2 version (\d+\.\d+\.\d+)", RegexOptions.IgnoreCase);
+            if (!match.Success)
+                throw new InvalidDataException("The downloader executable is invalid.");
+            return match.Groups[1].Value;
+        }
+
+        private static async Task<string> RunProcessAsync(string executable, string arguments,
+            System.Threading.CancellationToken cancellationToken, TimeSpan timeout, Action<string> outputLine)
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                Arguments = arguments,
+                WorkingDirectory = Path.GetDirectoryName(executable),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            cancellationToken.ThrowIfCancellationRequested();
+            using (var process = Process.Start(startInfo))
+            {
+                if (process == null)
+                    throw new InvalidOperationException("The download process could not be started.");
+                var output = new StringBuilder();
+                var outputLock = new object();
+                Task standardOutput = ReadProcessOutputAsync(process.StandardOutput, output, outputLock, outputLine);
+                Task standardError = ReadProcessOutputAsync(process.StandardError, output, outputLock, outputLine);
+                Task exited = Task.Run(() => process.WaitForExit());
+                using (cancellationToken.Register(() =>
+                {
+                    try { if (!process.HasExited) process.Kill(); }
+                    catch (InvalidOperationException) { }
+                    catch (System.ComponentModel.Win32Exception) { }
+                }))
+                {
+                    bool completed = await Task.WhenAny(exited, Task.Delay(timeout, cancellationToken))
+                        .ConfigureAwait(false) == exited;
+                    if (!completed)
+                    {
+                        try { if (!process.HasExited) process.Kill(); }
+                        catch (InvalidOperationException) { }
+                        catch (System.ComponentModel.Win32Exception) { }
+                    }
+
+                    await exited.ConfigureAwait(false);
+                    await Task.WhenAll(standardOutput, standardError).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!completed)
+                        throw new TimeoutException("The download process timed out.");
+                    string result;
+                    lock (outputLock) result = output.ToString();
+                    if (process.ExitCode != 0)
+                        throw new InvalidOperationException("The download process failed with exit code " +
+                            process.ExitCode + ".");
+                    return result;
+                }
+            }
+        }
+
+        private static async Task ReadProcessOutputAsync(StreamReader reader, StringBuilder output,
+            object outputLock, Action<string> outputLine)
+        {
+            string line;
+            while ((line = await reader.ReadLineAsync().ConfigureAwait(false)) != null)
+            {
+                lock (outputLock)
+                    output.AppendLine(line);
+                if (outputLine != null && !string.IsNullOrWhiteSpace(line))
+                    outputLine(line.Trim());
+            }
+        }
+
+        private static bool VerifySha256(string path, string expectedHash)
+        {
+            if (!File.Exists(path))
+                return false;
+            using (var stream = File.OpenRead(path))
+            using (var sha256 = SHA256.Create())
+            {
+                string actualHash = BitConverter.ToString(sha256.ComputeHash(stream))
+                    .Replace("-", "").ToLowerInvariant();
+                return string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private static string QuoteProcessArgument(string value)
+        {
+            return "\"" + (value ?? string.Empty).Replace("\"", "\\\"") + "\"";
+        }
+
+        private static void DeleteTemporaryFile(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch (IOException ex)
+            {
+                System.Diagnostics.Trace.TraceWarning("Temporary download archive cleanup warning: " + ex.Message);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                System.Diagnostics.Trace.TraceWarning("Temporary download archive cleanup warning: " + ex.Message);
+            }
+        }
+
+        private static void DeleteTemporaryDirectory(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, true);
+            }
+            catch (IOException ex)
+            {
+                System.Diagnostics.Trace.TraceWarning("Download staging cleanup warning: " + ex.Message);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                System.Diagnostics.Trace.TraceWarning("Download staging cleanup warning: " + ex.Message);
+            }
+        }
+    }
+
     /// <summary>
     /// PowerShell 7 installer/upgrader
     /// </summary>
@@ -1490,7 +2063,8 @@ namespace VSCodePortableCommon
 
                     try
                     {
-                        await DownloadFileAsync(client, url, zipPath, componentName, 10, 40, cancellationToken).ConfigureAwait(false);
+                        await DownloadFileAsync(url, zipPath, componentName, 10, 40, cancellationToken)
+                            .ConfigureAwait(false);
                     }
                     catch (OperationCanceledException)
                     {
@@ -1546,6 +2120,11 @@ namespace VSCodePortableCommon
                         string profilePath = Path.Combine(pwshDir, "Microsoft.PowerShell_profile.ps1");
                         if (File.Exists(profilePath))
                             File.Copy(profilePath, Path.Combine(stagingDir, "Microsoft.PowerShell_profile.ps1"), true);
+                    }
+                    else if (File.Exists(Path.Combine(pwshDir, "bin", "aria2c.exe")))
+                    {
+                        CommonHelper.CopyDirectoryRecursive(
+                            Path.Combine(pwshDir, "bin"), Path.Combine(stagingDir, "bin"));
                     }
 
                     var localeDirs = new[] { "cs", "de", "es", "fr", "it", "ja", "ko", "pl", "pt-BR", "ru", "tr", "zh-Hans", "zh-Hant" };
@@ -1610,26 +2189,21 @@ namespace VSCodePortableCommon
                 : new KeyValuePair<string, string>("PWSH7_VERSION", version);
         }
 
-        private async Task DownloadFileAsync(HttpClient client, string url, string destPath, string componentName,
+        private async Task DownloadFileAsync(string url, string destPath, string componentName,
             int startProgress, int endProgress, System.Threading.CancellationToken cancellationToken)
         {
             int lastProgress = startProgress;
-            await CommonHelper.DownloadFileWithRetryAsync(
-                client,
-                url,
-                destPath,
-                cancellationToken,
-                (downloaded, total) =>
+            await Aria2Downloader.DownloadFileAsync(baseDir, url, destPath, componentName,
+                cancellationToken, progress =>
                 {
-                    if (total <= 0)
-                        return;
-                    int progress = startProgress + (int)((endProgress - startProgress) * downloaded / total);
-                    if (progress > lastProgress)
+                    int mappedProgress = startProgress +
+                        (int)((endProgress - startProgress) * progress / 100.0);
+                    if (mappedProgress > lastProgress)
                     {
-                        updateStatus(componentName, "Downloading...", Math.Min(progress, endProgress));
-                        lastProgress = progress;
+                        updateStatus(componentName, "Downloading...", Math.Min(mappedProgress, endProgress));
+                        lastProgress = mappedProgress;
                     }
-                });
+                }).ConfigureAwait(false);
         }
 
         private async Task ExtractZipAsync(string zipPath, string extractPath, string componentName,
@@ -2375,7 +2949,7 @@ namespace VSCodePortableCommon
                     string downloadUrl = "https://update.code.visualstudio.com/" + resolvedVersion + "/win32-x64-archive/stable";
                     updateStatus(componentName, "Downloading...", 10);
                     logActivity("VS Code: Downloading version " + resolvedVersion + "...");
-                    await DownloadFileAsync(client, downloadUrl, zipPath, componentName, 10, 50);
+                    await DownloadFileAsync(downloadUrl, zipPath, componentName, 10, 50);
                     ValidateVSCodeArchive(zipPath);
 
                     if (Directory.Exists(stageDir))
@@ -2596,25 +3170,21 @@ namespace VSCodePortableCommon
                 File.Move(tempPath, markerPath);
         }
 
-        private async Task DownloadFileAsync(HttpClient client, string url, string destPath, string componentName, int startProgress, int endProgress)
+        private async Task DownloadFileAsync(string url, string destPath, string componentName,
+            int startProgress, int endProgress)
         {
             int lastProgress = startProgress;
-            await CommonHelper.DownloadFileWithRetryAsync(
-                client,
-                url,
-                destPath,
-                default(System.Threading.CancellationToken),
-                (downloaded, total) =>
+            await Aria2Downloader.DownloadFileAsync(baseDir, url, destPath, componentName,
+                default(System.Threading.CancellationToken), progress =>
                 {
-                    if (total <= 0)
-                        return;
-                    int progress = startProgress + (int)((endProgress - startProgress) * downloaded / total);
-                    if (progress > lastProgress)
+                    int mappedProgress = startProgress +
+                        (int)((endProgress - startProgress) * progress / 100.0);
+                    if (mappedProgress > lastProgress)
                     {
-                        updateStatus(componentName, "Downloading...", Math.Min(progress, endProgress));
-                        lastProgress = progress;
+                        updateStatus(componentName, "Downloading...", Math.Min(mappedProgress, endProgress));
+                        lastProgress = mappedProgress;
                     }
-                });
+                }).ConfigureAwait(false);
         }
 
         private async Task ExtractZipAsync(string zipPath, string extractPath, string componentName, int startProgress, int endProgress)
